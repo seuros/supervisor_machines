@@ -70,6 +70,11 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
         self.strategy
     }
 
+    #[must_use]
+    pub const fn intensity(&self) -> Intensity {
+        self.intensity
+    }
+
     /// True once the supervisor has escalated. It stays true: a supervisor that
     /// gave up does not change its mind.
     #[must_use]
