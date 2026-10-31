@@ -36,6 +36,20 @@ module SupervisorMachines
       starting(name, teardown: PATIENCE) { sleep }
     end
 
+    # A child whose teardown raises instead of reporting itself stopped.
+    def raising_starter(name)
+      lambda do
+        @starts.push(name)
+        running = Thread::Queue.new
+        Thread.new do
+          running.push(name)
+          sleep
+        ensure
+          raise Failure
+        end.tap { running.pop }
+      end
+    end
+
     # A starter that announces the start and does not return until its thread
     # is running inside its own teardown, so a child is never killed before it
     # could notice.
@@ -90,7 +104,7 @@ module SupervisorMachines
     end
 
     # A started tree over +names+, every child registered with +policy+.
-    def tree(names, strategy: :one_for_one, policy: :permanent, restarts: Decider::HISTORY)
+    def tree(names, strategy: :one_for_one, policy: :permanent, restarts: Decider::MAX_RESTARTS)
       tree = Supervisor.new(strategy: strategy, restarts: restarts, window: 60.0, backoff: IMMEDIATE)
       names.each { |name| tree.supervise(name, policy: policy, &@nursery.starter(name)) }
       tree.start

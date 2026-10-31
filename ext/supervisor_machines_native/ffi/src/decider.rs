@@ -12,9 +12,13 @@ use supervisor_machines::{Decision, Exit, Intensity, Policy, Strategy, Superviso
 
 use crate::{decision, exit, policy, strategy, strategy_name};
 
-/// Restart timestamps every shape keeps. Comfortably above any restart
-/// intensity a supervision tree is worth configuring with.
+/// Restart timestamps every shape keeps.
 const HISTORY: usize = 64;
+
+/// The core escalates one restart past the intensity, so the history has to
+/// hold one more timestamp than the intensity tolerates.
+#[expect(clippy::cast_possible_truncation)]
+const MAX_RESTARTS: u32 = HISTORY as u32 - 1;
 
 /// The child counts a [`Decider`] can be built for.
 const SUPPORTED_CHILDREN: [usize; 17] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 32];
@@ -87,6 +91,12 @@ impl Wrapper {
                 &[],
             )?
             .required;
+        if restarts > MAX_RESTARTS {
+            return Err(Error::new(
+                ruby.exception_arg_error(),
+                format!("{restarts} restarts cannot escalate, the most is {MAX_RESTARTS}"),
+            ));
+        }
         let strategy = strategy(ruby, name)?;
         let intensity = Intensity::new(restarts, window_ns);
         let tree = match children {
@@ -159,6 +169,7 @@ impl Wrapper {
 pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     let class = module.define_class("Decider", ruby.class_object())?;
     class.const_set("HISTORY", HISTORY)?;
+    class.const_set("MAX_RESTARTS", MAX_RESTARTS)?;
     class.const_set("SUPPORTED_CHILDREN", supported_children(ruby)?)?;
     class.define_singleton_method("new", function!(Wrapper::new, -1))?;
     class.define_method("stopped", method!(Wrapper::stopped, -1))?;

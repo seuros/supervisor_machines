@@ -54,5 +54,26 @@ module SupervisorMachines
       refute_predicate supervisor, :terminated?
       supervisor.stop(grace: Nursery::PATIENCE)
     end
+
+    def test_a_group_restart_does_not_bring_a_stopped_temporary_child_back
+      supervisor = Supervisor.new(strategy: :one_for_all, backoff: IMMEDIATE)
+      supervisor.supervise(:once, policy: :temporary, &@nursery.starter(:once))
+      supervisor.supervise(:always, &@nursery.starter(:always))
+      supervisor.start
+
+      assert_equal %i[once always], @nursery.starts(2)
+
+      @nursery.finish(:once)
+
+      assert_equal :once, @nursery.next_stop
+
+      @nursery.finish(:always, :abnormal)
+
+      assert_equal :always, @nursery.next_stop
+      assert_equal :always, @nursery.next_start
+      assert_nil @nursery.next_start(Nursery::QUIET)
+
+      supervisor.stop(grace: Nursery::PATIENCE)
+    end
   end
 end

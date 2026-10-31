@@ -24,5 +24,11 @@ module SupervisorMachines
     def test_a_tree_with_no_children_is_rejected
       assert_raises(ArgumentError) { Supervisor.new.start }
     end
+
+    def test_an_intensity_the_history_cannot_enforce_is_refused
+      error = assert_raises(ArgumentError) { Supervisor.new(restarts: Decider::MAX_RESTARTS + 1) }
+
+      assert_includes error.message, Decider::MAX_RESTARTS.to_s
+    end
   end
 end
