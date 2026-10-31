@@ -91,6 +91,46 @@ module SupervisorMachines
       assert_raises(Escalated) { supervisor.stop(grace: Nursery::PATIENCE) }
     end
 
+    def test_a_start_that_cannot_finish_takes_back_the_children_it_brought_up
+      supervisor = half_started_tree
+
+      assert_raises(Nursery::Failure) { supervisor.start }
+      assert_equal :up, @nursery.next_start
+      assert_equal :up, @nursery.next_stop
+      assert_predicate supervisor, :terminated?
+    end
+
+    def test_stop_after_a_start_that_cannot_finish_stays_escalated
+      supervisor = half_started_tree
+
+      assert_raises(Nursery::Failure) { supervisor.start }
+      assert_raises(Escalated) { supervisor.stop(grace: Nursery::PATIENCE) }
+      assert_raises(Escalated) { supervisor.stop(grace: Nursery::PATIENCE) }
+    end
+
+    def test_stop_without_a_start_has_nothing_to_take_down
+      supervisor = Supervisor.new(backoff: IMMEDIATE)
+      supervisor.supervise(:a, &@nursery.starter(:a))
+
+      assert_same supervisor, supervisor.stop(grace: Nursery::PATIENCE)
+      assert_nil @nursery.next_start(Nursery::QUIET)
+      refute_predicate supervisor, :terminated?
+    end
+
+    def test_a_second_start_is_refused_and_leaves_one_generation_running
+      supervisor = tree(%i[a])
+
+      assert_equal %i[a], @nursery.starts(1)
+      assert_raises(Error) { supervisor.start }
+      assert_nil @nursery.next_start(Nursery::QUIET)
+
+      supervisor.stop(grace: Nursery::PATIENCE)
+
+      assert_equal %i[a], @nursery.stops(1)
+      assert_nil @nursery.next_stop(Nursery::QUIET)
+      assert_raises(Error) { supervisor.start }
+    end
+
     def test_a_group_restart_waits_for_the_generation_it_retires
       supervisor = tree(%i[a b], strategy: :one_for_all)
 
@@ -105,6 +145,15 @@ module SupervisorMachines
     end
 
     private
+
+    # An unstarted tree whose second child's starter raises, so the first child
+    # is up by the time the start fails.
+    def half_started_tree
+      Supervisor.new(backoff: IMMEDIATE).tap do |supervisor|
+        supervisor.supervise(:up, &@nursery.starter(:up))
+        supervisor.supervise(:doomed) { raise Nursery::Failure }
+      end
+    end
 
     def wait_until
       deadline = monotonic + Nursery::PATIENCE

@@ -26,6 +26,19 @@ A starter block returns the `Thread` that runs the child, and is called again
 for every restart. A child that stops is noticed, handed to the core, and
 whatever the core decides is carried out.
 
+## Lifecycle
+
+A tree registers children, runs them, and ends either stopped or failed. Both
+endings are final: `start` raises `SupervisorMachines::Error` for a tree that
+is already running, has been stopped, or gave up — there is one generation of
+children per tree, and starting a second one is a bug, not a refresh.
+
+A `start` that cannot finish — a starter that raises — takes the children it
+already brought up back down in reverse start order, leaves the tree failed,
+and raises what the starter raised. Nothing is left running and nothing is left
+unsupervised. `stop` then raises `Escalated`, like any other tree that gave up,
+and a tree that was never started has nothing to take down.
+
 ## Strategies
 
 `:one_for_one` restarts only what died. `:one_for_all` restarts every child,

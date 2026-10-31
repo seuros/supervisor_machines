@@ -86,6 +86,13 @@ module SupervisorMachines
 
   # A supervision tree over threads.
   class Supervisor
+    # Where a tree is in its lifecycle: registering children, running them, or
+    # ended — `stopped` by its caller, `failed` by giving up.
+    type state = :registering | :running | :stopped | :failed
+
+    # Seconds a supervisor taking itself down waits for a killed child.
+    ESCALATION_GRACE: Float
+
     # Anything that can price the wait between a restart decision and the
     # respawn, which is `ChronoMachines::Executor` unless told otherwise.
     interface _Backoff
@@ -99,6 +106,7 @@ module SupervisorMachines
       attr_accessor starter: ^() -> Thread
       attr_accessor thread: Thread?
       attr_accessor epoch: Integer
+      attr_accessor done: bool
     end
 
     attr_reader strategy: strategy
@@ -117,7 +125,8 @@ module SupervisorMachines
 
     # Fixes the shape of the tree and starts every child in registration
     # order. Raises `ArgumentError` for a child count the core has no shape
-    # for.
+    # for, `Error` for a tree that is past registering, and whatever a starter
+    # raised after taking the children already up back down.
     def start: () -> self
 
     # Child names, in start order.
@@ -129,21 +138,31 @@ module SupervisorMachines
     def terminated?: () -> bool
 
     # Takes every running child down in reverse start order within `grace`
-    # seconds, or all the time it needs when `grace` is nil. Raises
-    # `Escalated` for a tree that gave up, every time it is called.
+    # seconds, or all the time it needs when `grace` is nil. A tree still
+    # registering has nothing to take down. Raises `Escalated` for a tree that
+    # gave up, every time it is called.
     def stop: (?grace: Float?) -> self
 
     private
 
+    # What a starter raised, after the children already up have been taken
+    # back down, or nil once the whole tree is up.
+    def launch: () -> Exception?
+    def rollback: () -> void
+    def running?: () -> bool
     def monitor: () -> void
     def handle: (Integer index, Integer epoch, exit_kind ending) -> void
     def restart: (Range[Integer] span) -> void
-    def escalate: () -> void
-    def shutdown: () -> void
+    def respawn: (Range[Integer] span) -> String?
+    def escalate: (?String reason) -> void
+    def shutdown: (?Float grace) -> Array[Exception]
+    def reap: (Thread thread, Float? remaining) -> Exception?
     def spawn: (Integer index) -> void
-    def retire: (Child child) -> void
+    def retire: (Child child) -> Thread?
     def watch: (Integer index, Integer epoch, Thread thread) -> void
     def escalation: () -> String
+    def abandoned: () -> String
+    def unstarted: (Exception error) -> String
     def monotonic_ns: () -> Integer
     def to_ns: (Float seconds) -> Integer
   end

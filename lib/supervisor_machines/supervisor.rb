@@ -9,6 +9,11 @@ module SupervisorMachines
   # +chrono_machines+ hands it, and taking the tree down in reverse start order
   # inside a +deadline_machines+ budget.
   #
+  # A tree is +registering+ until {#start} fixes its shape, +running+ while it
+  # watches its children, and ends either +stopped+ or +failed+. Both endings
+  # are final: {#start} refuses a tree that is not registering, and a +failed+
+  # tree answers every {#stop} with {Escalated}.
+  #
   #   tree = SupervisorMachines::Supervisor.new(strategy: :one_for_all, restarts: 3, window: 60.0)
   #   tree.supervise(:cache) { Thread.new { cache.run } }
   #   tree.supervise(:warmup, policy: :transient) { Thread.new { warm } }
@@ -45,7 +50,7 @@ module SupervisorMachines
       @events = Thread::Queue.new
       @mutex = Thread::Mutex.new
       @halt = Thread::ConditionVariable.new
-      @stopping = false
+      @state = :registering
       @failed = nil
     end
 
@@ -59,15 +64,25 @@ module SupervisorMachines
     end
 
     # Fixes the shape of the tree, starts every child in registration order and
-    # begins watching them.
+    # begins watching them. A starter that will not run takes the children
+    # already up back down, leaves the tree failed, and raises what the starter
+    # raised.
+    #
+    # Raises {Error} for a tree that is past registering.
     def start
       @mutex.synchronize do
+        raise Error, "a #{@state} supervisor cannot be started" unless @state == :registering
+
         @decider = Decider.new(children: @slots.size, strategy: @strategy,
                                restarts: @restarts, window_ns: to_ns(@window))
-        @slots.each_index { |index| spawn(index) }
+        @state = :running
+        @monitor = Thread.new { monitor }
       end
-      @monitor = Thread.new { monitor }
-      self
+      failure = launch
+      return self unless failure
+
+      rollback
+      raise failure
     end
 
     # Child names, in start order.
@@ -82,18 +97,23 @@ module SupervisorMachines
 
     # True once the tree has escalated, and true from then on.
     def terminated?
-      @mutex.synchronize { !@failed.nil? || @decider.terminated? }
+      @mutex.synchronize { @state == :failed }
     end
 
     # Takes every running child down in reverse start order, giving the whole
     # shutdown +grace+ seconds, or all the time it needs when +grace+ is nil.
+    # A tree still registering has nothing to take down and stays registering.
     #
     # Raises {Escalated} for a tree that gave up, every time it is called.
     def stop(grace: nil)
-      @mutex.synchronize do
-        @stopping = true
+      entered = @mutex.synchronize do
+        state = @state
+        @state = :stopped if state == :running
         @halt.broadcast
+        state
       end
+      return self if entered == :registering
+
       @events.push(STOP)
       failures = nil
       DeadlineMachines.with_deadline(grace) do |deadline|
@@ -106,11 +126,38 @@ module SupervisorMachines
       self
     end
 
-    # Seconds an escalating supervisor waits for a killed child, since the
-    # monitor thread has no caller budget to read.
+    # Seconds a supervisor taking itself down waits for a killed child, since
+    # neither the monitor thread nor a failing {#start} has a caller budget to
+    # read.
     ESCALATION_GRACE = 5.0
 
     private
+
+    # Brings every child up in registration order, returning what a starter
+    # raised, or nil once the whole tree is up.
+    def launch
+      @mutex.synchronize do
+        @slots.each_index { |index| spawn(index) }
+        nil
+      rescue Exception => e
+        @state = :failed
+        @failed = unstarted(e)
+        e
+      end
+    end
+
+    # Takes down whatever a start brought up before it failed, the children and
+    # the monitor watching them, inside one budget.
+    def rollback
+      DeadlineMachines.with_deadline(ESCALATION_GRACE) do |deadline|
+        shutdown
+        reap(@monitor, deadline.remaining)
+      end
+    end
+
+    def running?
+      @state == :running
+    end
 
     def monitor
       Thread.current.report_on_exception = false
@@ -126,7 +173,7 @@ module SupervisorMachines
     def handle(index, epoch, ending)
       decision = @mutex.synchronize do
         child = @slots[index]
-        next if @stopping || child.epoch != epoch
+        next unless running? && child.epoch == epoch
 
         child.thread = nil
         child.done = true if child.policy == :temporary
@@ -157,16 +204,16 @@ module SupervisorMachines
     def respawn(span)
       delay = @backoff.next_delay(attempt: @decider.recent_restarts(monotonic_ns))
       @halt.wait(@mutex, delay) if delay
-      return if @stopping
+      return unless running?
 
       span.each { |index| spawn(index) unless @slots[index].done }
       nil
     rescue Exception => e
-      "#{@strategy} supervisor escalated: #{e.message}"
+      unstarted(e)
     end
 
     def escalate(reason = escalation)
-      @stopping = true
+      @state = :failed
       @failed = reason
       shutdown(ESCALATION_GRACE)
       raise Escalated, reason
@@ -231,6 +278,10 @@ module SupervisorMachines
 
     def abandoned
       "#{@strategy} supervisor escalated: a retired child would not stop within #{ESCALATION_GRACE} seconds"
+    end
+
+    def unstarted(error)
+      "#{@strategy} supervisor escalated: #{error.message}"
     end
 
     def monotonic_ns
