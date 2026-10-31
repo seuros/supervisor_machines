@@ -188,11 +188,11 @@ module SupervisorMachines
     end
 
     def monotonic_ns
-      Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+      DeadlineMachines.clock.now_ns
     end
 
     def to_ns(seconds)
-      (seconds * NS_PER_SECOND).round
+      DeadlineMachines::Deadline.to_ns(seconds)
     end
   end
 end

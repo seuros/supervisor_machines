@@ -40,5 +40,5 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency 'chrono_machines', '~> 0.11'
   spec.add_dependency 'deadline_machines', '>= 0.1'
-  spec.add_dependency 'rb_sys', '~> 0.9'
+  spec.add_development_dependency 'rb_sys', '~> 0.9'
 end
