@@ -133,6 +133,13 @@ impl Wrapper {
         )?
         .required;
         let (policy, ending) = (policy(ruby, name)?, exit(ruby, ending)?);
+        let children = rb_self.0.borrow().children();
+        if index >= children {
+            return Err(Error::new(
+                ruby.exception_arg_error(),
+                format!("index {index} is outside the {children} children"),
+            ));
+        }
         let verdict = rb_self
             .0
             .borrow_mut()
