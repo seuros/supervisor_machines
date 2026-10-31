@@ -11,11 +11,43 @@
 
 mod decider;
 
-use magnus::{Error, RArray, Ruby, Symbol, Value, prelude::*};
+use magnus::{Error, Integer, RArray, Ruby, Symbol, TryConvert, Value, prelude::*};
 use supervisor_machines::{DEFAULT_RESTARTS, DEFAULT_WINDOW_NS, Decision, Exit, Policy, Strategy};
 
 /// Nanoseconds in a second.
 pub(crate) const NS_PER_SECOND: u32 = 1_000_000_000;
+
+/// A whole number of things: a child count, a child index, a restart
+/// intensity, a nanosecond reading.
+///
+/// magnus reads an integer through Ruby's `NUM2*` family, which truncates a
+/// `Float` towards zero instead of refusing it, so an argument that means an
+/// integer is read as one of these and anything but an `Integer` is turned
+/// away. An `Integer` outside the target width still comes back as the
+/// `RangeError` magnus raises for it. Seconds belong to the Ruby surface,
+/// which converts them before they reach here.
+pub(crate) struct Whole<T>(pub(crate) T);
+
+impl<T: TryConvert> TryConvert for Whole<T> {
+    fn try_convert(value: Value) -> Result<Self, Error> {
+        if Integer::from_value(value).is_none() {
+            return Err(not_whole(value));
+        }
+        T::try_convert(value).map(Self)
+    }
+}
+
+fn not_whole(value: Value) -> Error {
+    let ruby = Ruby::get_with(value);
+    Error::new(
+        ruby.exception_type_error(),
+        format!(
+            "no implicit conversion of {} into Integer: {}",
+            value.class(),
+            value.inspect()
+        ),
+    )
+}
 
 /// Every [`Strategy`], in the order the core declares them.
 pub(crate) const STRATEGIES: [(&str, Strategy); 3] = [

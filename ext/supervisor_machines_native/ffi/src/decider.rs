@@ -10,7 +10,7 @@ use magnus::scan_args::{get_kwargs, scan_args};
 use magnus::{Error, RArray, RHash, RModule, Ruby, Value, function, method, prelude::*};
 use supervisor_machines::{Decision, Exit, Intensity, Policy, Strategy, Supervisor};
 
-use crate::{decision, exit, policy, strategy, strategy_name};
+use crate::{Whole, decision, exit, policy, strategy, strategy_name};
 
 /// Restart timestamps every shape keeps.
 const HISTORY: usize = 64;
@@ -84,8 +84,8 @@ struct Wrapper(RefCell<Box<dyn Decide>>);
 impl Wrapper {
     fn new(ruby: &Ruby, args: &[Value]) -> Result<Self, Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        let (children, name, restarts, window_ns) =
-            get_kwargs::<_, (usize, Value, u32, u64), (), ()>(
+        let (Whole(children), name, Whole(restarts), Whole(window_ns)) =
+            get_kwargs::<_, (Whole<usize>, Value, Whole<u32>, Whole<u64>), (), ()>(
                 args.keywords,
                 &["children", "strategy", "restarts", "window_ns"],
                 &[],
@@ -126,12 +126,13 @@ impl Wrapper {
     /// `:ignore`, `:escalate`, or the inclusive range of children to restart.
     fn stopped(ruby: &Ruby, rb_self: &Self, args: &[Value]) -> Result<Value, Error> {
         let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
-        let (index, name, ending, now_ns) = get_kwargs::<_, (usize, Value, Value, u64), (), ()>(
-            args.keywords,
-            &["index", "policy", "exit", "now_ns"],
-            &[],
-        )?
-        .required;
+        let (Whole(index), name, ending, Whole(now_ns)) =
+            get_kwargs::<_, (Whole<usize>, Value, Value, Whole<u64>), (), ()>(
+                args.keywords,
+                &["index", "policy", "exit", "now_ns"],
+                &[],
+            )?
+            .required;
         let (policy, ending) = (policy(ruby, name)?, exit(ruby, ending)?);
         let children = rb_self.0.borrow().children();
         if index >= children {
@@ -159,7 +160,7 @@ impl Wrapper {
         self.0.borrow().terminated()
     }
 
-    fn recent_restarts(&self, now_ns: u64) -> u32 {
+    fn recent_restarts(&self, Whole(now_ns): Whole<u64>) -> u32 {
         self.0.borrow().recent_restarts(now_ns)
     }
 
