@@ -42,6 +42,7 @@ module SupervisorMachines
       @slots = []
       @events = Thread::Queue.new
       @mutex = Thread::Mutex.new
+      @halt = Thread::ConditionVariable.new
       @stopping = false
     end
 
@@ -86,7 +87,10 @@ module SupervisorMachines
     #
     # Raises {Escalated} for a tree that gave up, every time it is called.
     def stop(grace: nil)
-      @stopping = true
+      @mutex.synchronize do
+        @stopping = true
+        @halt.broadcast
+      end
       @events.push(STOP)
       DeadlineMachines.with_deadline(grace) do |deadline|
         shutdown
@@ -96,6 +100,10 @@ module SupervisorMachines
 
       self
     end
+
+    # Seconds an escalating supervisor waits for a killed child, since the
+    # monitor thread has no caller budget to read.
+    ESCALATION_GRACE = 5.0
 
     private
 
@@ -128,12 +136,10 @@ module SupervisorMachines
     # Retires the whole span, waits out the backoff without holding the tree,
     # then brings the span back in index order.
     def restart(span)
-      delay = @mutex.synchronize do
-        span.each { |index| retire(@slots[index]) }
-        @backoff.next_delay(attempt: @decider.recent_restarts(monotonic_ns))
-      end
-      sleep delay if delay
       @mutex.synchronize do
+        span.each { |index| retire(@slots[index]) }
+        delay = @backoff.next_delay(attempt: @decider.recent_restarts(monotonic_ns))
+        @halt.wait(@mutex, delay) if delay
         next if @stopping
 
         span.each { |index| spawn(index) }
@@ -142,20 +148,20 @@ module SupervisorMachines
 
     def escalate
       @stopping = true
-      shutdown
+      shutdown(ESCALATION_GRACE)
       raise Escalated, escalation
     end
 
     # Reverse start order, each child killed and then waited for inside
     # whatever budget the caller set. Touches no tree state, so a shutdown
     # under way in the monitor never holds up the one in {#stop}.
-    def shutdown
+    def shutdown(grace = DeadlineMachines.remaining)
       @slots.reverse_each do |child|
         thread = child.thread
         next unless thread
 
         thread.kill
-        thread.join(DeadlineMachines.remaining)
+        thread.join(grace)
       end
     end
 
