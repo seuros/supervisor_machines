@@ -40,8 +40,7 @@ pub struct Supervisor<const CHILDREN: usize, const HISTORY: usize> {
 }
 
 impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> {
-    /// Rejects a shape that could not measure its own intensity, at compile
-    /// time rather than as a silent miscount.
+    /// Rejects a shape that could not measure its own intensity.
     const SHAPE: () = {
         assert!(
             CHILDREN > 0,
@@ -119,10 +118,7 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
 
     /// Decide what to do about the child at `index`.
     ///
-    /// One restart is recorded per failure handled, not per child brought
-    /// back, so the strategy does not change how fast the intensity is spent.
-    /// That is OTP's accounting: `add_restart` runs once, then the strategy
-    /// decides how wide the restart goes.
+    /// One restart is recorded per failure handled, not per child restarted.
     pub const fn stopped(
         &mut self,
         index: usize,

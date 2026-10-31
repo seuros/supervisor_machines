@@ -2,10 +2,8 @@
 
 //! Supervision decisions, in the OTP sense.
 //!
-//! A child died. Which children restart, and has that happened too often to
-//! keep trying? That is all this crate answers. It never spawns, kills or waits
-//! for anything: the caller owns the threads, fibers or processes, and asks
-//! here what to do with them.
+//! Which children restart after one dies, and whether that has happened too
+//! often to keep trying. The caller owns the threads, fibers or processes.
 
 /// Compiles and runs the README's examples as doctests.
 #[cfg(doctest)]
@@ -21,10 +19,9 @@ pub use supervisor::Supervisor;
 pub enum Strategy {
     /// Restart only the child that died.
     OneForOne,
-    /// Restart every child, because they only work as a set.
+    /// Restart every child.
     OneForAll,
-    /// Restart the child that died and everything started after it, because
-    /// later children depend on earlier ones.
+    /// Restart the child that died and everything started after it.
     RestForOne,
 }
 

@@ -1,0 +1,150 @@
+# OTP-style supervision over Ruby threads.
+#
+# `Decider` is defined by the native extension, which binds the
+# `supervisor-machines` crate: it decides which children a failure takes down
+# and when restarting has stopped being worth it. `Supervisor` owns everything
+# the core refuses to touch, which is every thread.
+module SupervisorMachines
+  VERSION: String
+
+  # Nanoseconds in a second. Seconds are what the Ruby surface takes; the core
+  # is fed nanosecond integers.
+  NS_PER_SECOND: Integer
+
+  # Restarts OTP tolerates by default before escalating.
+  DEFAULT_RESTARTS: Integer
+
+  # The window OTP measures those restarts over, five seconds.
+  DEFAULT_WINDOW_NS: Integer
+
+  # Which siblings a failure takes down with it.
+  type strategy = :one_for_one | :one_for_all | :rest_for_one
+
+  # When a child is worth restarting.
+  type policy = :permanent | :transient | :temporary
+
+  # How a child's run ended.
+  type exit_kind = :normal | :abnormal
+
+  # What the core decided: leave it stopped, restart this inclusive range of
+  # child indices, or give up.
+  type decision = :ignore | :escalate | Range[Integer]
+
+  # Every strategy, in the order the core declares them. Anything else raises
+  # `ArgumentError`.
+  STRATEGIES: Array[strategy]
+
+  # Every policy, in the order the core declares them. Anything else raises
+  # `ArgumentError`.
+  POLICIES: Array[policy]
+
+  class Error < StandardError
+  end
+
+  # Raised once a supervisor has spent its restart intensity.
+  class Escalated < Error
+  end
+
+  # The core's decision machine. A child count and a restart history are part
+  # of its Rust type, so the count given here is dispatched to one of
+  # `SUPPORTED_CHILDREN` monomorphised shapes.
+  class Decider
+    # Restart timestamps every shape keeps.
+    HISTORY: Integer
+
+    # The child counts a decider can be built for. Anything else raises
+    # `ArgumentError`.
+    SUPPORTED_CHILDREN: Array[Integer]
+
+    def self.new: (
+      children: Integer,
+      strategy: strategy,
+      restarts: Integer,
+      window_ns: Integer
+    ) -> instance
+
+    # Feeds one stopped child to the core and returns what it decided.
+    def stopped: (
+      index: Integer,
+      policy: policy,
+      exit: exit_kind,
+      now_ns: Integer
+    ) -> decision
+
+    def children: () -> Integer
+
+    def strategy: () -> strategy
+
+    # True once the core has escalated, and true from then on.
+    def terminated?: () -> bool
+
+    # Restarts still inside the intensity window as of `now_ns`.
+    def recent_restarts: (Integer) -> Integer
+
+    def inspect: () -> String
+  end
+
+  # A supervision tree over threads.
+  class Supervisor
+    # Anything that can price the wait between a restart decision and the
+    # respawn, which is `ChronoMachines::Executor` unless told otherwise.
+    interface _Backoff
+      def next_delay: (attempt: Integer) -> Numeric?
+    end
+
+    # A registered child and whichever thread currently runs it.
+    class Child < ::Struct[untyped]
+      attr_accessor name: untyped
+      attr_accessor policy: policy
+      attr_accessor starter: ^() -> Thread
+      attr_accessor thread: Thread?
+      attr_accessor epoch: Integer
+    end
+
+    attr_reader strategy: strategy
+
+    # `restarts` within `window` seconds is the restart intensity.
+    def initialize: (
+      ?strategy: strategy,
+      ?restarts: Integer,
+      ?window: Float,
+      ?backoff: _Backoff?
+    ) -> void
+
+    # Registers a child under `name`. The block returns the `Thread` that runs
+    # it, and is called again for every restart.
+    def supervise: (untyped name, ?policy: policy) { () -> Thread } -> self
+
+    # Fixes the shape of the tree and starts every child in registration
+    # order. Raises `ArgumentError` for a child count the core has no shape
+    # for.
+    def start: () -> self
+
+    # Child names, in start order.
+    def children: () -> Array[untyped]
+
+    # Restarts still inside the intensity window.
+    def restarts: () -> Integer
+
+    def terminated?: () -> bool
+
+    # Takes every running child down in reverse start order within `grace`
+    # seconds, or all the time it needs when `grace` is nil. Raises
+    # `Escalated` for a tree that gave up, every time it is called.
+    def stop: (?grace: Float?) -> self
+
+    private
+
+    def monitor: () -> void
+    def handle: (Integer index, Integer epoch, exit_kind ending) -> void
+    def restart: (Range[Integer] span) -> void
+    def escalate: () -> void
+    def shutdown: () -> void
+    def spawn: (Integer index) -> void
+    def retire: (Child child) -> void
+    def watch: (Integer index, Integer epoch, Thread thread) -> void
+    def escalation: () -> String
+    def monotonic_ns: () -> Integer
+    def to_ns: (Float seconds) -> Integer
+  end
+end
