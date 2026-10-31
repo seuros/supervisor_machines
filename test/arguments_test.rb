@@ -25,6 +25,21 @@ module SupervisorMachines
       assert_raises(ArgumentError) { Supervisor.new.start }
     end
 
+    def test_a_started_tree_takes_on_no_more_children
+      supervisor = tree(%i[a])
+
+      assert_equal :a, @nursery.next_start
+      assert_raises(Error) { supervisor.supervise(:late, &@nursery.starter(:late)) }
+      assert_equal %i[a], supervisor.children
+      assert_nil @nursery.next_start(Nursery::QUIET)
+
+      supervisor.stop(grace: Nursery::PATIENCE)
+    end
+
+    def test_a_tree_that_never_started_has_no_restarts
+      assert_equal 0, Supervisor.new.restarts
+    end
+
     def test_a_child_index_outside_the_tree_is_refused
       decider = Decider.new(children: 2, strategy: :rest_for_one, restarts: 3, window_ns: 1_000)
 

@@ -59,7 +59,11 @@ module SupervisorMachines
     def supervise(name, policy: :permanent, &starter)
       raise ArgumentError, "unknown policy: #{policy.inspect}" unless POLICIES.include?(policy)
 
-      @mutex.synchronize { @slots << Child.new(name, policy, starter, nil, 0, false) }
+      @mutex.synchronize do
+        raise Error, "a #{@state} supervisor cannot take on a child" unless @state == :registering
+
+        @slots << Child.new(name, policy, starter, nil, 0, false)
+      end
       self
     end
 
@@ -92,7 +96,7 @@ module SupervisorMachines
 
     # Restarts still inside the intensity window.
     def restarts
-      @mutex.synchronize { @decider.recent_restarts(monotonic_ns) }
+      @mutex.synchronize { @decider ? @decider.recent_restarts(monotonic_ns) : 0 }
     end
 
     # True once the tree has escalated, and true from then on.
