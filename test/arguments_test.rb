@@ -25,6 +25,15 @@ module SupervisorMachines
       assert_raises(ArgumentError) { Supervisor.new.start }
     end
 
+    def test_a_child_index_outside_the_tree_is_refused
+      decider = Decider.new(children: 2, strategy: :rest_for_one, restarts: 3, window_ns: 1_000)
+
+      assert_raises(ArgumentError) do
+        decider.stopped(index: 2, policy: :permanent, exit: :abnormal, now_ns: 0)
+      end
+      assert_equal 0, decider.recent_restarts(0)
+    end
+
     def test_an_intensity_the_history_cannot_enforce_is_refused
       error = assert_raises(ArgumentError) { Supervisor.new(restarts: Decider::MAX_RESTARTS + 1) }
 
