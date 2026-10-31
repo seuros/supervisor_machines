@@ -158,6 +158,10 @@ module SupervisorMachines
     def shutdown: (?Float grace) -> Array[Exception]
     def reap: (Thread thread, Float? remaining) -> Exception?
     def spawn: (Integer index) -> void
+
+    # Installs a started thread under the generation that asked for it, killing
+    # it when the tree has moved past that generation.
+    def install: (Integer index, Integer generation, Thread thread) -> void
     def retire: (Child child) -> Thread?
     def watch: (Integer index, Integer epoch, Thread thread) -> void
     def escalation: () -> String

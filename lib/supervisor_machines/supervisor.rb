@@ -21,9 +21,10 @@ module SupervisorMachines
   #   tree.stop(grace: 5.0)
   class Supervisor
     # A registered child and whichever thread currently runs it. +epoch+ rises
-    # every time the child is taken down, so an exit reported by a thread the
-    # tree has already replaced is discarded. +done+ marks a child the tree has
-    # dropped, which no group restart brings back.
+    # every time the child is taken down, so a thread the tree has already
+    # replaced neither reports its exit nor takes the child's place when its
+    # starter returns late. +done+ marks a child the tree has dropped, which no
+    # group restart brings back.
     Child = Struct.new(:name, :policy, :starter, :thread, :epoch, :done)
 
     # Wakes the monitor when the tree is being taken down.
@@ -140,14 +141,14 @@ module SupervisorMachines
     # Brings every child up in registration order, returning what a starter
     # raised, or nil once the whole tree is up.
     def launch
+      @slots.each_index { |index| spawn(index) }
+      nil
+    rescue Exception => e
       @mutex.synchronize do
-        @slots.each_index { |index| spawn(index) }
-        nil
-      rescue Exception => e
         @state = :failed
         @failed = unstarted(e)
-        e
       end
+      e
     end
 
     # Takes down whatever a start brought up before it failed, the children and
@@ -200,25 +201,25 @@ module SupervisorMachines
       end
       return escalate(abandoned) if retiring.any?(&:alive?)
 
-      failure = @mutex.synchronize { respawn(span) }
+      failure = respawn(span)
       escalate(failure) if failure
     end
 
     # The reason a respawn could not happen, or nil once the span is running.
     def respawn(span)
-      delay = @backoff.next_delay(attempt: @decider.recent_restarts(monotonic_ns))
-      @halt.wait(@mutex, delay) if delay
-      return unless running?
-
-      span.each { |index| spawn(index) unless @slots[index].done }
+      delay = @backoff.next_delay(attempt: restarts)
+      @mutex.synchronize { @halt.wait(@mutex, delay) if delay && running? }
+      span.each { |index| spawn(index) }
       nil
     rescue Exception => e
       unstarted(e)
     end
 
     def escalate(reason = escalation)
-      @state = :failed
-      @failed = reason
+      @mutex.synchronize do
+        @state = :failed
+        @failed = reason
+      end
       shutdown(ESCALATION_GRACE)
       raise Escalated, reason
     end
@@ -251,10 +252,28 @@ module SupervisorMachines
       e
     end
 
+    # Calls the child's starter outside the lock, under the generation the tree
+    # is in when the call goes out. A child the tree has dropped, and every
+    # child of a tree that is no longer running, is left alone.
     def spawn(index)
       child = @slots[index]
-      child.thread = child.starter.call
-      watch(index, child.epoch, child.thread)
+      generation = @mutex.synchronize { child.epoch if running? && !child.done }
+      install(index, generation, child.starter.call) if generation
+    end
+
+    # Hands the started thread to the child, unless the tree has moved past the
+    # generation that asked for it, in which case the thread is killed instead
+    # of left running with nothing watching it.
+    def install(index, generation, thread)
+      installed = @mutex.synchronize do
+        child = @slots[index]
+        next false unless running? && child.epoch == generation
+
+        child.thread = thread
+        watch(index, generation, thread)
+        true
+      end
+      reap(thread, ESCALATION_GRACE) unless installed
     end
 
     # Invalidates the watcher following the child and hands its thread back to

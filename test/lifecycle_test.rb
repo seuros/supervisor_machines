@@ -144,7 +144,66 @@ module SupervisorMachines
       supervisor.stop(grace: Nursery::PATIENCE)
     end
 
+    def test_a_starter_can_ask_the_tree_that_is_starting_it_about_itself
+      supervisor = Supervisor.new(backoff: IMMEDIATE)
+      seen = nil
+      supervisor.supervise(:curious) do
+        seen = [supervisor.children, supervisor.restarts, supervisor.terminated?]
+        @nursery.starter(:curious).call
+      end
+      supervisor.start
+
+      assert_equal [%i[curious], 0, false], seen
+      assert_equal :curious, @nursery.next_start
+      supervisor.stop(grace: Nursery::PATIENCE)
+    end
+
+    def test_a_stop_while_a_starter_is_blocked_spends_only_its_grace
+      gate = Thread::Queue.new
+      supervisor = blocked_start(gate)
+      release_after(Nursery::PATIENCE, gate)
+
+      started = monotonic
+      supervisor.stop(grace: Nursery::QUIET)
+
+      assert_operator monotonic - started, :<, Nursery::PATIENCE
+    end
+
+    def test_a_starter_returning_after_a_stop_has_its_thread_taken_down
+      gate = Thread::Queue.new
+      supervisor = blocked_start(gate)
+      release_after(Nursery::QUIET, gate)
+      supervisor.stop(grace: Nursery::PATIENCE)
+
+      assert_equal :blocking, @nursery.next_start
+      assert_equal :blocking, @nursery.next_stop
+      refute_predicate supervisor, :terminated?
+    end
+
     private
+
+    # Lets a blocked starter return +seconds+ from now.
+    def release_after(seconds, gate)
+      Thread.new do
+        sleep seconds
+        gate.push(:go)
+      end
+    end
+
+    # A tree whose one starter has been called and will not return until +gate+
+    # is pushed.
+    def blocked_start(gate)
+      Supervisor.new(backoff: IMMEDIATE).tap do |supervisor|
+        entered = Thread::Queue.new
+        supervisor.supervise(:blocking) do
+          entered.push(:in)
+          gate.pop
+          @nursery.starter(:blocking).call
+        end
+        Thread.new { supervisor.start }
+        entered.pop
+      end
+    end
 
     # An unstarted tree whose second child's starter raises, so the first child
     # is up by the time the start fails.
