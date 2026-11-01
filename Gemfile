@@ -4,10 +4,12 @@ source 'https://rubygems.org'
 
 gemspec
 
-# deadline_machines is not released yet; use the sibling checkout when there is
-# one, and the published gem once there is one of those.
-sibling = File.expand_path('../deadline_machines', __dir__)
-gem 'deadline_machines', path: sibling if File.directory?(sibling)
+# Use a sibling checkout when there is one, so a change there is tested here
+# before it is published, and the published gem otherwise.
+%w[deadline_machines chrono_machines].each do |name|
+  sibling = File.expand_path("../#{name}", __dir__)
+  gem name, path: sibling if File.directory?(sibling)
+end
 
 gem 'minitest', '~> 6.0'
 gem 'rake', '~> 13.0'
