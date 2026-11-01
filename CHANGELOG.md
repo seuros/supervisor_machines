@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/seuros/supervisor_machines/compare/supervisor_machines/v0.1.2...supervisor_machines/v0.1.3) (2026-11-01)
+
+
+### Bug Fixes
+
+* enable the rb-sys compiled fallback so new Rubies can build ([ef51e18](https://github.com/seuros/supervisor_machines/commit/ef51e18b3fe96522ce56ace91d93055e33996e78))
+* raise the chrono_machines floor to 0.12.1 ([20b6538](https://github.com/seuros/supervisor_machines/commit/20b6538967c3e6bde705c8822d3a53ad6a07a1f6))
+
 ## [0.1.2](https://github.com/seuros/supervisor_machines/compare/supervisor_machines/v0.1.1...supervisor_machines/v0.1.2) (2026-11-01)
 
 
