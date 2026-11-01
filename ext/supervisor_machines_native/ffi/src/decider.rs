@@ -30,6 +30,7 @@ trait Decide: Send {
     fn strategy(&self) -> Strategy;
     fn terminated(&self) -> bool;
     fn recent_restarts(&self, now_ns: u64) -> u32;
+    fn restart_delay_ns(&self, base_ns: u64, ceiling_ns: u64, now_ns: u64) -> u64;
     fn stopped(&mut self, index: usize, policy: Policy, exit: Exit, now_ns: u64) -> Decision;
 }
 
@@ -52,6 +53,10 @@ impl<const CHILDREN: usize> Decide for Shape<CHILDREN> {
 
     fn recent_restarts(&self, now_ns: u64) -> u32 {
         self.0.recent_restarts(now_ns)
+    }
+
+    fn restart_delay_ns(&self, base_ns: u64, ceiling_ns: u64, now_ns: u64) -> u64 {
+        self.0.restart_delay_ns(base_ns, ceiling_ns, now_ns)
     }
 
     fn stopped(&mut self, index: usize, policy: Policy, exit: Exit, now_ns: u64) -> Decision {
@@ -164,6 +169,23 @@ impl Wrapper {
         self.0.borrow().recent_restarts(now_ns)
     }
 
+    /// How long to hold off a granted restart, backing off per restart already
+    /// inside the window.
+    fn restart_delay_ns(rb_self: &Self, args: &[Value]) -> Result<u64, Error> {
+        let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
+        let (Whole(base_ns), Whole(ceiling_ns), Whole(now_ns)) =
+            get_kwargs::<_, (Whole<u64>, Whole<u64>, Whole<u64>), (), ()>(
+                args.keywords,
+                &["base_ns", "ceiling_ns", "now_ns"],
+                &[],
+            )?
+            .required;
+        Ok(rb_self
+            .0
+            .borrow()
+            .restart_delay_ns(base_ns, ceiling_ns, now_ns))
+    }
+
     fn inspect(ruby: &Ruby, rb_self: &Self) -> String {
         format!(
             "#<SupervisorMachines::Decider strategy={} children={} terminated={}>",
@@ -185,6 +207,7 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     class.define_method("strategy", method!(Wrapper::strategy, 0))?;
     class.define_method("terminated?", method!(Wrapper::terminated, 0))?;
     class.define_method("recent_restarts", method!(Wrapper::recent_restarts, 1))?;
+    class.define_method("restart_delay_ns", method!(Wrapper::restart_delay_ns, -1))?;
     class.define_method("inspect", method!(Wrapper::inspect, 0))?;
     Ok(())
 }

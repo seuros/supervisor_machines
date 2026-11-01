@@ -97,6 +97,58 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
         counted
     }
 
+    /// How long to hold off the restart just granted: `base_ns` doubled once
+    /// per restart already inside the window, capped at `ceiling_ns`.
+    ///
+    /// Neither OTP nor [`stopped`](Self::stopped) imposes a delay, so a
+    /// supervisor that restarts the moment a child dies spends its whole
+    /// intensity budget in the time it takes to fail that many times. For a
+    /// child that dies while being constructed that is well under a
+    /// millisecond, and the window the intensity was written for never gets to
+    /// mean anything. Waiting this long between the decision and the restart
+    /// spreads the budget back over that window.
+    ///
+    /// The count decays as the window slides, so a child that settles returns
+    /// to `base_ns` on its own. Jitter is the caller's to add.
+    ///
+    /// ```
+    /// use supervisor_machines::{Exit, Intensity, Policy, Strategy, Supervisor};
+    ///
+    /// const MS: u64 = 1_000_000;
+    ///
+    /// let mut tree: Supervisor<1, 8> = Supervisor::new(
+    ///     Strategy::OneForOne,
+    ///     Intensity::new(5, 60_000 * MS),
+    /// );
+    ///
+    /// // The first restart waits the base, each further one twice as long.
+    /// tree.stopped(0, Policy::Permanent, Exit::Abnormal, 0);
+    /// assert_eq!(tree.restart_delay_ns(100 * MS, 10_000 * MS, 0), 100 * MS);
+    ///
+    /// tree.stopped(0, Policy::Permanent, Exit::Abnormal, MS);
+    /// assert_eq!(tree.restart_delay_ns(100 * MS, 10_000 * MS, MS), 200 * MS);
+    ///
+    /// // Once the window has slid past them the delay is back to the base.
+    /// assert_eq!(
+    ///     tree.restart_delay_ns(100 * MS, 10_000 * MS, 120_000 * MS),
+    ///     100 * MS,
+    /// );
+    /// ```
+    #[must_use]
+    pub const fn restart_delay_ns(&self, base_ns: u64, ceiling_ns: u64, now_ns: u64) -> u64 {
+        let mut delay = base_ns;
+        let mut doublings = self.recent_restarts(now_ns).saturating_sub(1);
+        while doublings > 0 && delay < ceiling_ns {
+            delay = delay.saturating_mul(2);
+            doublings -= 1;
+        }
+        if delay > ceiling_ns {
+            ceiling_ns
+        } else {
+            delay
+        }
+    }
+
     /// The children a failure at `index` takes with it under this strategy.
     #[must_use]
     pub const fn span(&self, index: usize) -> Span {

@@ -159,3 +159,36 @@ fn the_strategy_does_not_change_how_fast_the_intensity_is_spent() {
         Decision::Escalate
     );
 }
+
+/// The delay doubles while restarts pile up inside the window, holds at the
+/// ceiling, and falls back to the base once the window has slid past them.
+#[test]
+fn the_restart_delay_backs_off_and_recovers() {
+    const MS: u64 = 1_000_000;
+    let mut tree: Supervisor<1, 16> =
+        Supervisor::new(Strategy::OneForOne, Intensity::new(8, 60_000 * MS));
+
+    let delays: [u64; 5] = core::array::from_fn(|attempt| {
+        let now = attempt as u64 * MS;
+        tree.stopped(0, Policy::Permanent, Exit::Abnormal, now);
+        tree.restart_delay_ns(100 * MS, 800 * MS, now)
+    });
+    assert_eq!(delays, [100 * MS, 200 * MS, 400 * MS, 800 * MS, 800 * MS]);
+
+    assert_eq!(
+        tree.restart_delay_ns(100 * MS, 800 * MS, 120_000 * MS),
+        100 * MS
+    );
+}
+
+/// A base past the ceiling is still capped, and no shift can overflow.
+#[test]
+fn the_restart_delay_never_outruns_its_ceiling() {
+    let mut tree: Supervisor<1, 64> =
+        Supervisor::new(Strategy::OneForOne, Intensity::new(u32::MAX, u64::MAX));
+    for attempt in 0..64 {
+        tree.stopped(0, Policy::Permanent, Exit::Abnormal, attempt);
+    }
+    assert_eq!(tree.restart_delay_ns(u64::MAX, 5, 64), 5);
+    assert_eq!(tree.restart_delay_ns(1, u64::MAX, 64), 1 << 63);
+}
