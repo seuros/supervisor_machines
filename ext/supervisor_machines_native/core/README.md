@@ -43,6 +43,32 @@ One restart is recorded per failure handled, not per child brought back, so the
 strategy does not change how fast the intensity is spent. That is OTP's
 accounting.
 
+## Restart delay
+
+`Decision::Restart` says what to bring back, not when, which is also OTP. Act on
+it immediately and a child that dies while being constructed spends the whole
+intensity budget in well under a millisecond, so the window the intensity was
+written for never means anything.
+
+`restart_delay_ns(base, ceiling, now)` is how long to wait first: `base` doubled
+once per restart already inside the window, capped at `ceiling`. The count
+decays as the window slides, so a child that settles returns to `base` on its
+own. Jitter is the caller's to add.
+
+```rust
+# use supervisor_machines::{Exit, Intensity, Policy, Strategy, Supervisor};
+# const MS: u64 = 1_000_000;
+# let mut tree: Supervisor<1, 8> = Supervisor::new(
+#     Strategy::OneForOne,
+#     Intensity::new(5, 60_000 * MS),
+# );
+tree.stopped(0, Policy::Permanent, Exit::Abnormal, 0);
+assert_eq!(tree.restart_delay_ns(100 * MS, 10_000 * MS, 0), 100 * MS);
+
+tree.stopped(0, Policy::Permanent, Exit::Abnormal, MS);
+assert_eq!(tree.restart_delay_ns(100 * MS, 10_000 * MS, MS), 200 * MS);
+```
+
 ## Policies
 
 `Permanent` always comes back, even from a clean exit. `Transient` comes back
