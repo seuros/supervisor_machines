@@ -4,6 +4,9 @@ require 'test_helper'
 
 module SupervisorMachines
   class LifecycleTest < Test
+    # Stops issued after the tree has already come down.
+    REPEATED_STOPS = 200
+
     def test_stop_takes_children_down_in_reverse_start_order
       supervisor = tree(%i[a b c d])
 
@@ -178,6 +181,18 @@ module SupervisorMachines
       assert_equal :blocking, @nursery.next_start
       assert_equal :blocking, @nursery.next_stop
       refute_predicate supervisor, :terminated?
+    end
+
+    def test_stopping_a_stopped_tree_notifies_nobody_twice
+      supervisor = tree(%i[a])
+
+      assert_equal :a, @nursery.next_start
+
+      supervisor.stop(grace: Nursery::PATIENCE)
+      queued = supervisor.instance_variable_get(:@events).size
+      REPEATED_STOPS.times { supervisor.stop(grace: Nursery::QUIET) }
+
+      assert_equal queued, supervisor.instance_variable_get(:@events).size
     end
 
     def test_the_tree_asks_the_clock_without_holding_its_own_lock

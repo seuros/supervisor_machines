@@ -120,7 +120,7 @@ module SupervisorMachines
       end
       return self if entered == :registering
 
-      @events.push(STOP)
+      @events.push(STOP) if entered == :running
       failures = nil
       DeadlineMachines.with_deadline(grace) do |deadline|
         failures = shutdown
