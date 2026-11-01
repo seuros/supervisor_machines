@@ -16,4 +16,4 @@ workspace = true
 
 [dependencies]
 supervisor-machines = { workspace = true, features = ["std"] }
-magnus = "0.9"
+magnus = { version = ">= 0.9.3", default-features = false, features = ["io"] }
