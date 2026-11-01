@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/seuros/supervisor_machines/compare/supervisor-machines-v0.2.0...supervisor-machines-v0.3.0) (2026-11-01)
+
+
+### Features
+
+* back off granted restarts by recent restart count ([e7532e8](https://github.com/seuros/supervisor_machines/commit/e7532e8e98e43171c8d76f176161fdea50403a27))
+
 ## [0.2.0](https://github.com/seuros/supervisor_machines/compare/supervisor-machines-v0.1.0...supervisor-machines-v0.2.0) (2026-11-01)
 
 
