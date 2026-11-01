@@ -180,7 +180,56 @@ module SupervisorMachines
       refute_predicate supervisor, :terminated?
     end
 
+    def test_the_tree_asks_the_clock_without_holding_its_own_lock
+      supervisor = tree(%i[a])
+
+      assert_equal :a, @nursery.next_start
+
+      reentrant = Object.new
+      reentrant.define_singleton_method(:now_ns) do
+        supervisor.children
+        Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+      end
+      with_clock(reentrant) { assert_equal 0, supervisor.restarts }
+
+      supervisor.stop(grace: Nursery::PATIENCE)
+    end
+
+    def test_a_stop_does_not_wait_on_another_threads_clock
+      supervisor = tree(%i[a])
+
+      assert_equal :a, @nursery.next_start
+
+      gate = Thread::Queue.new
+      selective = Object.new
+      selective.define_singleton_method(:now_ns) do
+        gate.pop if Thread.current[:blocked]
+        Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+      end
+
+      with_clock(selective) do
+        asker = Thread.new do
+          Thread.current[:blocked] = true
+          supervisor.restarts
+        end
+        started = monotonic
+        supervisor.stop(grace: Nursery::QUIET)
+
+        assert_operator monotonic - started, :<, Nursery::PATIENCE
+        gate << :go
+        asker.join(Nursery::PATIENCE)
+      end
+    end
+
     private
+
+    def with_clock(clock)
+      previous = DeadlineMachines.clock
+      DeadlineMachines.clock = clock
+      yield
+    ensure
+      DeadlineMachines.clock = previous
+    end
 
     # Lets a blocked starter return +seconds+ from now.
     def release_after(seconds, gate)

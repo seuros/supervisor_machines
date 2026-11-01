@@ -97,7 +97,8 @@ module SupervisorMachines
 
     # Restarts still inside the intensity window.
     def restarts
-      @mutex.synchronize { @decider ? @decider.recent_restarts(monotonic_ns) : 0 }
+      now = monotonic_ns
+      @mutex.synchronize { @decider ? @decider.recent_restarts(now) : 0 }
     end
 
     # True once the tree has escalated, and true from then on.
@@ -176,13 +177,14 @@ module SupervisorMachines
 
     # One child stopped. The core says what that means; this carries it out.
     def handle(index, epoch, ending)
+      now = monotonic_ns
       decision = @mutex.synchronize do
         child = @slots[index]
         next unless running? && child.epoch == epoch
 
         child.thread = nil
         child.done = true if child.policy == :temporary
-        @decider.stopped(index: index, policy: child.policy, exit: ending, now_ns: monotonic_ns)
+        @decider.stopped(index: index, policy: child.policy, exit: ending, now_ns: now)
       end
 
       case decision
