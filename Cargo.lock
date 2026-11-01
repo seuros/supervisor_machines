@@ -259,6 +259,7 @@ name = "supervisor_machines_native"
 version = "0.1.2"
 dependencies = [
  "magnus",
+ "rb-sys",
  "supervisor-machines",
 ]
 
