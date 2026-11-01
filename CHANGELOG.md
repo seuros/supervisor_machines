@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.2](https://github.com/seuros/supervisor_machines/compare/supervisor_machines/v0.1.1...supervisor_machines/v0.1.2) (2026-11-01)
+
+
+### Features
+
+* back off granted restarts by recent restart count ([e7532e8](https://github.com/seuros/supervisor_machines/commit/e7532e8e98e43171c8d76f176161fdea50403a27))
+
+
+### Bug Fixes
+
+* a republished platform gem is skipped, not fatal ([39160e7](https://github.com/seuros/supervisor_machines/commit/39160e7e295d58500d846fb56d190eff6e803151))
+
 ## [0.1.1](https://github.com/seuros/supervisor_machines/compare/supervisor_machines-v0.1.0...supervisor_machines/v0.1.1) (2026-11-01)
 
 
