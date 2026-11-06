@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/supervisor_machines/compare/supervisor-machines-v0.3.0...supervisor-machines-v0.4.0) (2026-11-06)
+
+
+### Features
+
+* share one restart history across processes ([b08b7e9](https://github.com/seuros/supervisor_machines/commit/b08b7e90353b97ef83af5ff0e77b8b68cec41431))
+
+
+### Bug Fixes
+
+* keep test modules out of the packaged crate ([746649b](https://github.com/seuros/supervisor_machines/commit/746649b776f509d03ba770e91691d8b32e7c0a57))
+
 ## [0.3.0](https://github.com/seuros/supervisor_machines/compare/supervisor-machines-v0.2.0...supervisor-machines-v0.3.0) (2026-11-01)
 
 
