@@ -192,3 +192,126 @@ fn the_restart_delay_never_outruns_its_ceiling() {
     assert_eq!(tree.restart_delay_ns(u64::MAX, 5, 64), 5);
     assert_eq!(tree.restart_delay_ns(1, u64::MAX, 64), 1 << 63);
 }
+
+/// What one process persisted rebuilds the same intensity window in another.
+#[test]
+fn a_restored_history_spends_the_budget_the_first_process_already_spent() {
+    let intensity = Intensity::new(2, MINUTE);
+    let mut first: Supervisor<1, 8> = Supervisor::new(Strategy::OneForOne, intensity);
+    first.stopped(0, Policy::Permanent, Exit::Abnormal, 10 * SECOND);
+    first.stopped(0, Policy::Permanent, Exit::Abnormal, 20 * SECOND);
+    assert!(first.history().eq([10 * SECOND, 20 * SECOND]));
+
+    let mut second: Supervisor<1, 8> = Supervisor::restore(
+        first.strategy(),
+        first.intensity(),
+        first.history(),
+        25 * SECOND,
+    );
+
+    assert!(second.history().eq(first.history()));
+    assert_eq!(second.recent_restarts(25 * SECOND), 2);
+    assert_eq!(
+        second.restart_delay_ns(SECOND, MINUTE, 25 * SECOND),
+        2 * SECOND
+    );
+    assert_eq!(
+        second.stopped(0, Policy::Permanent, Exit::Abnormal, 30 * SECOND),
+        Decision::Escalate
+    );
+}
+
+#[test]
+fn restoring_drops_restarts_the_window_has_slid_past() {
+    let saved = [SECOND, 2 * SECOND, 50 * SECOND, 55 * SECOND];
+    let tree: Supervisor<1, 8> = Supervisor::restore(
+        Strategy::OneForOne,
+        Intensity::new(5, 10 * SECOND),
+        saved,
+        MINUTE,
+    );
+
+    assert!(tree.history().eq([50 * SECOND, 55 * SECOND]));
+    assert_eq!(tree.recent_restarts(MINUTE), 2);
+}
+
+#[test]
+fn restoring_more_than_fits_keeps_the_newest() {
+    let tree: Supervisor<1, 4> = Supervisor::restore(
+        Strategy::OneForOne,
+        Intensity::new(3, MINUTE),
+        (1..=6).map(|tick| tick * SECOND),
+        10 * SECOND,
+    );
+
+    assert!(
+        tree.history()
+            .eq([3 * SECOND, 4 * SECOND, 5 * SECOND, 6 * SECOND])
+    );
+}
+
+/// A restart another process performed counts the same as one granted here.
+#[test]
+fn an_external_restart_spends_the_budget() {
+    let mut tree: Supervisor<1, 8> =
+        Supervisor::new(Strategy::OneForOne, Intensity::new(1, MINUTE));
+    tree.record_external_restart(SECOND);
+
+    assert!(!tree.terminated());
+    assert_eq!(tree.recent_restarts(SECOND), 1);
+    assert_eq!(tree.restart_delay_ns(SECOND, MINUTE, 2 * SECOND), SECOND);
+    assert_eq!(
+        tree.stopped(0, Policy::Permanent, Exit::Abnormal, 2 * SECOND),
+        Decision::Escalate
+    );
+}
+
+/// Two processes that each restarted the child merge into one window, in
+/// order, and the same history absorbed twice counts nothing twice.
+#[test]
+fn absorbing_merges_in_order_without_counting_twice() {
+    let intensity = Intensity::new(3, MINUTE);
+    let mut mine: Supervisor<1, 8> = Supervisor::new(Strategy::OneForOne, intensity);
+    mine.stopped(0, Policy::Permanent, Exit::Abnormal, 10 * SECOND);
+    mine.stopped(0, Policy::Permanent, Exit::Abnormal, 30 * SECOND);
+
+    let mut theirs: Supervisor<1, 8> = Supervisor::new(Strategy::OneForOne, intensity);
+    theirs.record_external_restart(10 * SECOND);
+    theirs.record_external_restart(20 * SECOND);
+
+    mine.absorb(theirs.history(), 31 * SECOND);
+    assert!(mine.history().eq([10 * SECOND, 20 * SECOND, 30 * SECOND]));
+
+    mine.absorb(theirs.history(), 32 * SECOND);
+    assert_eq!(mine.recent_restarts(32 * SECOND), 3);
+    assert_eq!(
+        mine.stopped(0, Policy::Permanent, Exit::Abnormal, 33 * SECOND),
+        Decision::Escalate
+    );
+}
+
+#[test]
+fn absorbing_ignores_restarts_outside_the_window() {
+    let mut tree: Supervisor<1, 8> =
+        Supervisor::new(Strategy::OneForOne, Intensity::new(2, 10 * SECOND));
+    tree.absorb([SECOND, 2 * SECOND, 55 * SECOND], MINUTE);
+
+    assert!(tree.history().eq([55 * SECOND]));
+    assert!(matches!(
+        tree.stopped(0, Policy::Permanent, Exit::Abnormal, MINUTE),
+        Decision::Restart(_)
+    ));
+}
+
+#[test]
+fn a_full_history_lets_the_oldest_go_whichever_order_they_arrive() {
+    let mut tree: Supervisor<1, 3> =
+        Supervisor::new(Strategy::OneForOne, Intensity::new(2, MINUTE));
+    tree.record_external_restart(5 * SECOND);
+    tree.record_external_restart(3 * SECOND);
+    tree.record_external_restart(9 * SECOND);
+    tree.record_external_restart(7 * SECOND);
+    tree.record_external_restart(SECOND);
+
+    assert!(tree.history().eq([5 * SECOND, 7 * SECOND, 9 * SECOND]));
+}

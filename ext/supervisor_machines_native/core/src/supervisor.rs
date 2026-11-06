@@ -35,7 +35,6 @@ pub struct Supervisor<const CHILDREN: usize, const HISTORY: usize> {
     intensity: Intensity,
     history: [u64; HISTORY],
     recorded: usize,
-    next: usize,
     terminated: bool,
 }
 
@@ -60,9 +59,44 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
             intensity,
             history: [0; HISTORY],
             recorded: 0,
-            next: 0,
             terminated: false,
         }
+    }
+
+    /// A supervisor that already holds `history`, as another process left it.
+    ///
+    /// Restarts older than the intensity window as of `now_ns` are dropped on
+    /// the way in, and when more remain than `HISTORY` can hold the oldest go.
+    ///
+    /// ```
+    /// use supervisor_machines::{Intensity, Strategy, Supervisor};
+    ///
+    /// const SECOND: u64 = 1_000_000_000;
+    ///
+    /// let mut before: Supervisor<1, 8> =
+    ///     Supervisor::new(Strategy::OneForOne, Intensity::new(3, 60 * SECOND));
+    /// before.record_external_restart(10 * SECOND);
+    /// before.record_external_restart(20 * SECOND);
+    ///
+    /// // Persist `before.history()`, then rebuild it elsewhere.
+    /// let after: Supervisor<1, 8> = Supervisor::restore(
+    ///     before.strategy(),
+    ///     before.intensity(),
+    ///     before.history(),
+    ///     30 * SECOND,
+    /// );
+    /// assert_eq!(after.recent_restarts(30 * SECOND), 2);
+    /// ```
+    #[must_use]
+    pub fn restore(
+        strategy: Strategy,
+        intensity: Intensity,
+        history: impl IntoIterator<Item = u64>,
+        now_ns: u64,
+    ) -> Self {
+        let mut supervisor = Self::new(strategy, intensity);
+        supervisor.absorb(history, now_ns);
+        supervisor
     }
 
     #[must_use]
@@ -82,19 +116,60 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
         self.terminated
     }
 
+    /// Every restart the supervisor still holds, oldest first, in nanoseconds.
+    ///
+    /// This is what to persist so another process can
+    /// [`restore`](Self::restore) or [`absorb`](Self::absorb) it.
+    pub fn history(&self) -> impl Iterator<Item = u64> + '_ {
+        self.history[..self.recorded].iter().copied()
+    }
+
     /// Restarts still inside the window as of `now_ns`.
     #[must_use]
     pub const fn recent_restarts(&self, now_ns: u64) -> u32 {
         let cutoff = now_ns.saturating_sub(self.intensity.window_ns);
         let mut counted = 0;
+        let mut index = self.recorded;
+        while index > 0 && self.history[index - 1] >= cutoff {
+            counted += 1;
+            index -= 1;
+        }
+        counted
+    }
+
+    /// Count a restart some other process performed at `now_ns`.
+    ///
+    /// It spends the intensity budget exactly as a restart this supervisor
+    /// granted would, but decides nothing: escalation waits for the next
+    /// [`stopped`](Self::stopped).
+    pub const fn record_external_restart(&mut self, now_ns: u64) {
+        self.record(now_ns);
+    }
+
+    /// Merge restarts another process holds, as its [`history`](Self::history)
+    /// reported them.
+    ///
+    /// Restarts older than the window as of `now_ns` are dropped, and a
+    /// timestamp this supervisor already holds is not counted again, so
+    /// absorbing the same history twice changes nothing.
+    pub fn absorb(&mut self, history: impl IntoIterator<Item = u64>, now_ns: u64) {
+        let cutoff = now_ns.saturating_sub(self.intensity.window_ns);
+        for at_ns in history {
+            if at_ns >= cutoff && !self.holds(at_ns) {
+                self.record(at_ns);
+            }
+        }
+    }
+
+    const fn holds(&self, at_ns: u64) -> bool {
         let mut index = 0;
         while index < self.recorded {
-            if self.history[index] >= cutoff {
-                counted += 1;
+            if self.history[index] == at_ns {
+                return true;
             }
             index += 1;
         }
-        counted
+        false
     }
 
     /// How long to hold off the restart just granted: `base_ns` doubled once
@@ -165,11 +240,26 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
         }
     }
 
-    const fn record(&mut self, now_ns: u64) {
-        self.history[self.next] = now_ns;
-        self.next = (self.next + 1) % HISTORY;
+    const fn record(&mut self, at_ns: u64) {
+        let mut slot = self.recorded;
+        while slot > 0 && self.history[slot - 1] > at_ns {
+            slot -= 1;
+        }
         if self.recorded < HISTORY {
+            let mut index = self.recorded;
+            while index > slot {
+                self.history[index] = self.history[index - 1];
+                index -= 1;
+            }
+            self.history[slot] = at_ns;
             self.recorded += 1;
+        } else if slot > 0 {
+            let mut index = 1;
+            while index < slot {
+                self.history[index - 1] = self.history[index];
+                index += 1;
+            }
+            self.history[slot - 1] = at_ns;
         }
     }
 

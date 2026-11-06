@@ -69,6 +69,40 @@ tree.stopped(0, Policy::Permanent, Exit::Abnormal, MS);
 assert_eq!(tree.restart_delay_ns(100 * MS, 10_000 * MS, MS), 200 * MS);
 ```
 
+## Sharing a history
+
+A daemon that several processes may each respawn needs one restart history, or
+every process starts with a fresh budget and a crash-looping child is respawned
+forever. `history()` yields the restart timestamps, oldest first; persist them
+next to the daemon's lock. `restore` rebuilds a supervisor from them in another
+process, `absorb` merges a history into a running one, and
+`record_external_restart` counts a single restart someone else performed. All
+three drop restarts the window has slid past, and absorbing a timestamp already
+held counts nothing twice.
+
+```rust
+use supervisor_machines::{Decision, Exit, Intensity, Policy, Strategy, Supervisor};
+
+const SECOND: u64 = 1_000_000_000;
+
+let intensity = Intensity::new(2, 60 * SECOND);
+let mut first: Supervisor<1, 8> = Supervisor::new(Strategy::OneForOne, intensity);
+first.stopped(0, Policy::Permanent, Exit::Abnormal, 10 * SECOND);
+first.stopped(0, Policy::Permanent, Exit::Abnormal, 20 * SECOND);
+
+// Another process reads what the first wrote down.
+let mut second: Supervisor<1, 8> =
+    Supervisor::restore(Strategy::OneForOne, intensity, first.history(), 25 * SECOND);
+assert_eq!(second.recent_restarts(25 * SECOND), 2);
+assert_eq!(
+    second.stopped(0, Policy::Permanent, Exit::Abnormal, 30 * SECOND),
+    Decision::Escalate,
+);
+```
+
+Escalation is not shared: each process decides for itself from the merged
+history.
+
 ## Policies
 
 `Permanent` always comes back, even from a clean exit. `Transient` comes back
