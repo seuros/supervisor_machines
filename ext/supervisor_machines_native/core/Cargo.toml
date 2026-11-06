@@ -10,7 +10,7 @@ repository = "https://github.com/seuros/supervisor_machines"
 keywords = ["supervisor", "supervision-tree", "otp", "restart", "no-std"]
 categories = ["no-std", "concurrency"]
 readme = "README.md"
-
+exclude = ["src/**/tests.rs", "tests/"]
 [lib]
 name = "supervisor_machines"
 crate-type = ["lib"]
