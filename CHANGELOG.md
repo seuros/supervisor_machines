@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/seuros/supervisor_machines/compare/supervisor_machines/v0.3.1...supervisor_machines/v0.3.2) (2026-11-14)
+
+
+### Bug Fixes
+
+* **deps:** require matryona-machines &gt;= 0.4 ([c6bb9ed](https://github.com/seuros/supervisor_machines/commit/c6bb9edb77be3af8da24e90bf252437b44d2da84))
+
 ## [0.3.1](https://github.com/seuros/supervisor_machines/compare/supervisor_machines/v0.3.0...supervisor_machines/v0.3.1) (2026-11-14)
 
 
