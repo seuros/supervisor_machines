@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/seuros/supervisor_machines/compare/supervisor_machines/v0.2.0...supervisor_machines/v0.3.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona-machines 0.2: struct-only reads, native Restart check, symbols! tables, caret rb-sys
+
+### Features
+
+* adopt matryona-machines 0.2: struct-only reads, native Restart check, symbols! tables, caret rb-sys ([836afc6](https://github.com/seuros/supervisor_machines/commit/836afc6d615cf53a61e57a75d88b4c14a3ea4329))
+
 ## [0.2.0](https://github.com/seuros/supervisor_machines/compare/supervisor_machines/v0.1.4...supervisor_machines/v0.2.0) (2026-11-14)
 
 
