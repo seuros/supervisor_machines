@@ -14,39 +14,69 @@ module SupervisorMachines
   # are final: {#start} refuses a tree that is not registering, and a +failed+
   # tree answers every {#stop} with {Escalated}.
   #
-  #   tree = SupervisorMachines::Supervisor.new(strategy: :one_for_all, restarts: 3, window: 60.0)
+  # Every instant and span it takes or reports is Integer nanoseconds. The
+  # sibling gems it drives still take Float seconds, so the conversion happens
+  # here, at their door.
+  #
+  #   minute = 60 * 1_000_000_000
+  #   tree = SupervisorMachines::Supervisor.new(:one_for_all, SupervisorMachines::Intensity.new(3, minute))
   #   tree.supervise(:cache) { Thread.new { cache.run } }
   #   tree.supervise(:warmup, policy: :transient) { Thread.new { warm } }
   #   tree.start
-  #   tree.stop(grace: 5.0)
+  #   tree.stop(5 * 1_000_000_000)
   class Supervisor
     # A registered child and whichever thread currently runs it. +epoch+ rises
     # every time the child is taken down, so a thread the tree has already
     # replaced neither reports its exit nor takes the child's place when its
     # starter returns late. +done+ marks a child the tree has dropped, which no
-    # group restart brings back.
-    Child = Struct.new(:name, :policy, :starter, :thread, :epoch, :done)
+    # group restart brings back. A child is replaced, never mutated, and only
+    # under the tree's lock.
+    Child = Data.define(:name, :policy, :starter, :thread, :epoch, :done) do
+      def initialize(name:, policy:, starter:, thread:, epoch:, done:)
+        policy = SupervisorMachines.__send__(:__policy, policy)
+        super
+      end
+    end
+    Child.singleton_class.undef_method(:allocate)
+    Child.define_singleton_method(:inherited) { |_| raise TypeError, "#{Child} cannot be subclassed" }
+    private_constant :Child
+
+    # Converts the nanoseconds this class takes into the seconds its sibling
+    # gems take.
+    NS_PER_SECOND = 1_000_000_000
+    private_constant :NS_PER_SECOND
 
     # Wakes the monitor when the tree is being taken down.
     STOP = Object.new
     private_constant :STOP
 
-    attr_reader :strategy
+    attr_reader :strategy, :intensity
 
-    # +restarts+ within +window+ seconds is the restart intensity; past it the
-    # tree escalates. +backoff+ is asked for the delay between a restart
-    # decision and the respawn; its attempt budget has to be one wider than the
-    # intensity, because the core escalates one restart after the last one it
-    # tolerates.
-    def initialize(strategy: :one_for_one, restarts: DEFAULT_RESTARTS,
-                   window: DEFAULT_WINDOW_NS / NS_PER_SECOND.to_f, backoff: nil)
-      raise ArgumentError, "unknown strategy: #{strategy.inspect}" unless STRATEGIES.include?(strategy)
-      raise ArgumentError, "at most #{Decider::MAX_RESTARTS} restarts" if restarts > Decider::MAX_RESTARTS
+    # +strategy+ is one of STRATEGIES and +intensity+ an {Intensity}, as the
+    # core's +Supervisor::new+ takes them; past the intensity the tree
+    # escalates. TypeError for the wrong types, RangeError for an unknown
+    # strategy or more restarts than {Decider::MAX_RESTARTS}. +backoff+ is
+    # asked for the delay between a restart decision and the respawn; its
+    # attempt budget has to be one wider than the intensity, because the core
+    # escalates one restart after the last one it tolerates.
+    #
+    # +backoff:+ and {#supervise}'s +policy: :permanent+ are keyword defaults
+    # the core has no counterpart for. They stay because this class is a
+    # runtime on top of the core, not a mirror of it; {Decider} is the mirror.
+    def initialize(strategy, intensity, backoff: nil)
+      strategy = SupervisorMachines.__send__(:__strategy, strategy)
+      unless intensity.instance_of?(Intensity)
+        raise TypeError, "expected a SupervisorMachines::Intensity, got #{intensity.inspect}"
+      end
+      # Rebuilt through the core's check: `Marshal.load` skips `initialize`.
+      intensity = Intensity.new(intensity.restarts, intensity.window)
+      if intensity.restarts > Decider::MAX_RESTARTS
+        raise RangeError, "#{intensity.restarts} restarts cannot escalate, the most is #{Decider::MAX_RESTARTS}"
+      end
 
       @strategy = strategy
-      @restarts = restarts
-      @window = window
-      @backoff = backoff || ChronoMachines::Executor.new(max_attempts: restarts + 1)
+      @intensity = intensity
+      @backoff = backoff || ChronoMachines::Executor.new(max_attempts: intensity.restarts + 1)
       @slots = []
       @events = Thread::Queue.new
       @mutex = Thread::Mutex.new
@@ -57,13 +87,14 @@ module SupervisorMachines
 
     # Registers a child under +name+. The block is its starter: it returns the
     # +Thread+ that runs the child, and is called again for every restart.
+    # TypeError for a +policy+ that is not a Symbol, RangeError for one outside
+    # POLICIES.
     def supervise(name, policy: :permanent, &starter)
-      raise ArgumentError, "unknown policy: #{policy.inspect}" unless POLICIES.include?(policy)
-
+      child = Child.new(name, policy, starter, nil, 0, false)
       @mutex.synchronize do
         raise Error, "a #{@state} supervisor cannot take on a child" unless @state == :registering
 
-        @slots << Child.new(name, policy, starter, nil, 0, false)
+        @slots << child
       end
       self
     end
@@ -73,13 +104,13 @@ module SupervisorMachines
     # already up back down, leaves the tree failed, and raises what the starter
     # raised.
     #
-    # Raises {Error} for a tree that is past registering.
+    # Raises {Error} for a tree that is past registering, RangeError for a
+    # child count the core has no shape for.
     def start
       @mutex.synchronize do
         raise Error, "a #{@state} supervisor cannot be started" unless @state == :registering
 
-        @decider = Decider.new(children: @slots.size, strategy: @strategy,
-                               restarts: @restarts, window_ns: to_ns(@window))
+        @decider = Decider.new(@slots.size, @strategy, @intensity)
         @state = :running
         @monitor = Thread.new { monitor }
       end
@@ -107,11 +138,14 @@ module SupervisorMachines
     end
 
     # Takes every running child down in reverse start order, giving the whole
-    # shutdown +grace+ seconds, or all the time it needs when +grace+ is nil.
-    # A tree still registering has nothing to take down and stays registering.
+    # shutdown +grace+ nanoseconds, or all the time it needs when +grace+ is
+    # nil. A tree still registering has nothing to take down and stays
+    # registering. TypeError for a non-Integer +grace+, RangeError for a
+    # negative one, both before anything is touched.
     #
     # Raises {Escalated} for a tree that gave up, every time it is called.
-    def stop(grace: nil)
+    def stop(grace = nil)
+      budget = grace.nil? ? nil : seconds(grace)
       entered = @mutex.synchronize do
         state = @state
         @state = :stopped if state == :running
@@ -122,7 +156,7 @@ module SupervisorMachines
 
       @events.push(STOP) if entered == :running
       failures = nil
-      DeadlineMachines.with_deadline(grace) do |deadline|
+      DeadlineMachines.with_deadline(budget) do |deadline|
         failures = shutdown
         @monitor.kill unless @monitor.join(deadline.remaining)
       end
@@ -132,10 +166,10 @@ module SupervisorMachines
       self
     end
 
-    # Seconds a supervisor taking itself down waits for a killed child, since
-    # neither the monitor thread nor a failing {#start} has a caller budget to
-    # read.
-    ESCALATION_GRACE = 5.0
+    # Nanoseconds a supervisor taking itself down waits for a killed child,
+    # since neither the monitor thread nor a failing {#start} has a caller
+    # budget to read.
+    ESCALATION_GRACE = 5 * NS_PER_SECOND
 
     private
 
@@ -155,7 +189,7 @@ module SupervisorMachines
     # Takes down whatever a start brought up before it failed, the children and
     # the monitor watching them, inside one budget.
     def rollback
-      DeadlineMachines.with_deadline(ESCALATION_GRACE) do |deadline|
+      DeadlineMachines.with_deadline(seconds(ESCALATION_GRACE)) do |deadline|
         shutdown
         reap(@monitor, deadline.remaining)
       end
@@ -182,14 +216,17 @@ module SupervisorMachines
         child = @slots[index]
         next unless running? && child.epoch == epoch
 
-        child.thread = nil
-        child.done = true if child.policy == :temporary
-        @decider.stopped(index: index, policy: child.policy, exit: ending, now_ns: now)
+        @slots[index] = child.with(thread: nil, done: child.done || child.policy == :temporary)
+        @decider.stopped(index, child.policy, ending, now)
       end
 
       case decision
-      when Range then restart(decision)
+      when Restart then restart(decision.span)
       when :escalate then escalate
+      # Nothing to carry out: a child left stopped, a tree that already gave
+      # up, an index the tree does not own (it only asks about its own), or
+      # an event from a generation the tree has replaced.
+      when :ignore, :already_escalated, :unknown_child, nil then nil
       end
     end
 
@@ -197,8 +234,8 @@ module SupervisorMachines
     # waits out the backoff without holding the tree, then brings the span back
     # in index order.
     def restart(span)
-      retiring = @mutex.synchronize { span.reverse_each.filter_map { |index| retire(@slots[index]) } }
-      DeadlineMachines.with_deadline(ESCALATION_GRACE) do |deadline|
+      retiring = @mutex.synchronize { span.last.downto(span.first).filter_map { |index| retire(index) } }
+      DeadlineMachines.with_deadline(seconds(ESCALATION_GRACE)) do |deadline|
         retiring.each { |thread| reap(thread, deadline.remaining) }
       end
       return escalate(abandoned) if retiring.any?(&:alive?)
@@ -211,7 +248,7 @@ module SupervisorMachines
     def respawn(span)
       delay = @backoff.next_delay(attempt: restarts)
       @mutex.synchronize { @halt.wait(@mutex, delay) if delay && running? }
-      span.each { |index| spawn(index) }
+      span.first.upto(span.last) { |index| spawn(index) }
       nil
     rescue Exception => e
       unstarted(e)
@@ -222,12 +259,12 @@ module SupervisorMachines
         @state = :failed
         @failed = reason
       end
-      shutdown(ESCALATION_GRACE)
+      shutdown(seconds(ESCALATION_GRACE))
       raise Escalated, reason
     end
 
     # Reverse start order, each child killed and then waited for inside one
-    # budget shared by the whole tree. Touches no tree state, so a shutdown
+    # budget of +grace+ seconds shared by the whole tree. Touches no tree state, so a shutdown
     # under way in the monitor never holds up the one in {#stop}. Returns what
     # the children raised on their way out, having stopped all of them.
     def shutdown(grace = DeadlineMachines.remaining)
@@ -258,9 +295,11 @@ module SupervisorMachines
     # is in when the call goes out. A child the tree has dropped, and every
     # child of a tree that is no longer running, is left alone.
     def spawn(index)
-      child = @slots[index]
-      generation = @mutex.synchronize { child.epoch if running? && !child.done }
-      install(index, generation, child.starter.call) if generation
+      generation, starter = @mutex.synchronize do
+        child = @slots[index]
+        [child.epoch, child.starter] if running? && !child.done
+      end
+      install(index, generation, starter.call) if generation
     end
 
     # Hands the started thread to the child, unless the tree has moved past the
@@ -271,20 +310,19 @@ module SupervisorMachines
         child = @slots[index]
         next false unless running? && child.epoch == generation
 
-        child.thread = thread
+        @slots[index] = child.with(thread: thread)
         watch(index, generation, thread)
         true
       end
-      reap(thread, ESCALATION_GRACE) unless installed
+      reap(thread, seconds(ESCALATION_GRACE)) unless installed
     end
 
-    # Invalidates the watcher following the child and hands its thread back to
-    # be reaped outside the lock.
-    def retire(child)
-      child.epoch += 1
-      thread = child.thread
-      child.thread = nil
-      thread
+    # Invalidates the watcher following the child at +index+ and hands its
+    # thread back to be reaped outside the lock.
+    def retire(index)
+      child = @slots[index]
+      @slots[index] = child.with(epoch: child.epoch + 1, thread: nil)
+      child.thread
     end
 
     # One thread per running child, blocked on it, reporting how it ended.
@@ -298,11 +336,12 @@ module SupervisorMachines
     end
 
     def escalation
-      @failed || "#{@strategy} supervisor escalated: more than #{@restarts} restarts in #{@window} seconds"
+      @failed || "#{@strategy} supervisor escalated: more than #{@intensity.restarts} restarts in " \
+                 "#{@intensity.window} ns"
     end
 
     def abandoned
-      "#{@strategy} supervisor escalated: a retired child would not stop within #{ESCALATION_GRACE} seconds"
+      "#{@strategy} supervisor escalated: a retired child would not stop within #{ESCALATION_GRACE} ns"
     end
 
     def unstarted(error)
@@ -313,8 +352,12 @@ module SupervisorMachines
       DeadlineMachines.clock.now_ns
     end
 
-    def to_ns(seconds)
-      DeadlineMachines::Deadline.to_ns(seconds)
+    # Integer nanoseconds as the Float seconds deadline_machines takes.
+    def seconds(nanos)
+      raise TypeError, "a grace is Integer nanoseconds, got #{nanos.inspect}" unless nanos.is_a?(Integer)
+      raise RangeError, "a grace cannot be negative: #{nanos}" if nanos.negative?
+
+      nanos.fdiv(NS_PER_SECOND)
     end
   end
 end

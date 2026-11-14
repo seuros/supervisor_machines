@@ -15,6 +15,10 @@ module SupervisorMachines
     # How long a test waits to be convinced nothing is going to happen.
     QUIET = 0.2
 
+    # The same two waits as the Integer nanoseconds a supervisor takes.
+    PATIENCE_NS = 2_000_000_000
+    QUIET_NS = 200_000_000
+
     # What an abnormal child raises on its way out.
     class Failure < StandardError; end
 
@@ -94,6 +98,9 @@ module SupervisorMachines
   end
 
   class Test < Minitest::Test
+    SECOND = 1_000_000_000
+    MINUTE = 60 * SECOND
+
     # A tree restarts as fast as it can decide to, so the tests measure the
     # supervisor rather than chrono_machines' backoff curve.
     IMMEDIATE = ChronoMachines::Executor.new(base_delay: 0, max_attempts: Decider::HISTORY)
@@ -105,7 +112,7 @@ module SupervisorMachines
 
     # A started tree over +names+, every child registered with +policy+.
     def tree(names, strategy: :one_for_one, policy: :permanent, restarts: Decider::MAX_RESTARTS)
-      tree = Supervisor.new(strategy: strategy, restarts: restarts, window: 60.0, backoff: IMMEDIATE)
+      tree = Supervisor.new(strategy, Intensity.new(restarts, MINUTE), backoff: IMMEDIATE)
       names.each { |name| tree.supervise(name, policy: policy, &@nursery.starter(name)) }
       tree.start
     end

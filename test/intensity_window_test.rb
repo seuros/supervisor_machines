@@ -29,7 +29,7 @@ module SupervisorMachines
       assert_equal 0, supervisor.restarts
       refute_predicate supervisor, :terminated?
 
-      supervisor.stop(grace: Nursery::PATIENCE)
+      supervisor.stop(Nursery::PATIENCE_NS)
     end
   end
 end

@@ -1,162 +1,174 @@
+use core::time::Duration;
+
+use crate::tests::some;
 use crate::{Decision, Exit, Intensity, Policy, Span, Strategy, Supervisor};
 
-const SECOND: u64 = 1_000_000_000;
-const MINUTE: u64 = 60 * SECOND;
+mod history;
+mod model;
+mod refusal;
 
-fn tree<const CHILDREN: usize>(strategy: Strategy) -> Supervisor<CHILDREN, 64> {
-    Supervisor::new(strategy, Intensity::new(100, MINUTE))
+const SECOND: Duration = Duration::from_secs(1);
+const MINUTE: Duration = Duration::from_secs(60);
+
+fn seconds(count: u64) -> Duration {
+    Duration::from_secs(count)
 }
 
-#[test]
-fn one_for_one_restarts_only_the_child_that_died() {
-    let mut supervisor = tree::<5>(Strategy::OneForOne);
-
-    assert_eq!(
-        supervisor.stopped(2, Policy::Permanent, Exit::Abnormal, 0),
-        Decision::Restart(Span { first: 2, last: 2 })
-    );
+fn intensity(restarts: u32, window: Duration) -> Intensity {
+    some(Intensity::new(restarts, window))
 }
 
-#[test]
-fn one_for_all_restarts_every_child_whichever_one_died() {
-    let mut supervisor = tree::<5>(Strategy::OneForAll);
-    let whole = Span { first: 0, last: 4 };
-
-    assert_eq!(
-        supervisor.stopped(0, Policy::Permanent, Exit::Abnormal, 0),
-        Decision::Restart(whole)
-    );
-    assert_eq!(
-        supervisor.stopped(4, Policy::Permanent, Exit::Abnormal, SECOND),
-        Decision::Restart(whole)
-    );
+fn tree<const CHILDREN: usize>(strategy: Strategy) -> Supervisor<CHILDREN, 128> {
+    some(Supervisor::new(strategy, intensity(100, MINUTE)))
 }
 
-#[test]
-fn rest_for_one_restarts_the_child_and_everything_started_after_it() {
-    let mut supervisor = tree::<5>(Strategy::RestForOne);
-
-    assert_eq!(
-        supervisor.stopped(2, Policy::Permanent, Exit::Abnormal, 0),
-        Decision::Restart(Span { first: 2, last: 4 })
-    );
-    assert_eq!(
-        supervisor.stopped(4, Policy::Permanent, Exit::Abnormal, SECOND),
-        Decision::Restart(Span { first: 4, last: 4 })
-    );
+fn small<const HISTORY: usize>(restarts: u32, window: Duration) -> Supervisor<3, HISTORY> {
+    some(Supervisor::new(
+        Strategy::OneForOne,
+        intensity(restarts, window),
+    ))
 }
 
-#[test]
-fn a_temporary_child_is_never_restarted() {
-    let mut supervisor = tree::<3>(Strategy::OneForAll);
-
-    assert_eq!(
-        supervisor.stopped(1, Policy::Temporary, Exit::Abnormal, 0),
-        Decision::Ignore
-    );
-    assert_eq!(
-        supervisor.stopped(1, Policy::Temporary, Exit::Normal, SECOND),
-        Decision::Ignore
-    );
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "compared against what stopped answers"
+)]
+fn restart(first: usize, last: usize) -> Result<Decision, crate::Refusal> {
+    Ok(Decision::Restart(some(Span::new(first, last))))
 }
 
-#[test]
-fn a_transient_child_comes_back_only_after_a_bad_exit() {
-    let mut supervisor = tree::<3>(Strategy::OneForOne);
+const BAD: (Policy, Exit) = (Policy::Permanent, Exit::Abnormal);
 
-    assert_eq!(
-        supervisor.stopped(1, Policy::Transient, Exit::Normal, 0),
-        Decision::Ignore
-    );
-    assert_eq!(
-        supervisor.stopped(1, Policy::Transient, Exit::Abnormal, SECOND),
-        Decision::Restart(Span::single(1))
-    );
+/// Each strategy's span for a child that died, and the span query agrees.
+#[test]
+fn the_strategy_decides_which_children_restart() {
+    let cases = [
+        (Strategy::OneForOne, [(2, 2), (4, 4)]),
+        (Strategy::OneForAll, [(0, 4), (0, 4)]),
+        (Strategy::RestForOne, [(2, 4), (4, 4)]),
+    ];
+    for (strategy, spans) in cases {
+        let mut supervisor = tree::<5>(strategy);
+        for ((index, (first, last)), now) in [2, 4].into_iter().zip(spans).zip([0, 1]) {
+            assert_eq!(supervisor.span(index), Span::new(first, last));
+            assert_eq!(
+                supervisor.stopped(index, BAD.0, BAD.1, seconds(now)),
+                restart(first, last),
+                "{strategy:?} child {index}"
+            );
+        }
+        assert_eq!(supervisor.span(5), None);
+    }
 }
 
+/// Temporary never comes back, transient only from a bad exit, permanent
+/// even from a clean one.
 #[test]
-fn a_permanent_child_comes_back_even_from_a_clean_exit() {
-    let mut supervisor = tree::<3>(Strategy::OneForOne);
-
-    assert_eq!(
-        supervisor.stopped(1, Policy::Permanent, Exit::Normal, 0),
-        Decision::Restart(Span::single(1))
-    );
+fn the_policy_decides_whether_a_child_restarts() {
+    let cases = [
+        (Policy::Temporary, Exit::Normal, false),
+        (Policy::Temporary, Exit::Abnormal, false),
+        (Policy::Transient, Exit::Normal, false),
+        (Policy::Transient, Exit::Abnormal, true),
+        (Policy::Permanent, Exit::Normal, true),
+        (Policy::Permanent, Exit::Abnormal, true),
+    ];
+    for (policy, exit, restarts) in cases {
+        let mut supervisor = tree::<3>(Strategy::OneForOne);
+        let expected = if restarts {
+            restart(1, 1)
+        } else {
+            Ok(Decision::Ignore)
+        };
+        assert_eq!(
+            supervisor.stopped(1, policy, exit, Duration::ZERO),
+            expected,
+            "{policy:?} after {exit:?}"
+        );
+    }
 }
 
+/// An ignored stop holds whatever the time, so it records nothing at all.
 #[test]
-fn an_ignored_stop_does_not_spend_the_restart_budget() {
-    let mut supervisor: Supervisor<3, 8> =
-        Supervisor::new(Strategy::OneForOne, Intensity::new(1, MINUTE));
+fn an_ignored_stop_changes_nothing() {
+    let mut supervisor = small::<8>(1, MINUTE);
+    let before = supervisor;
 
     for tick in 0..50 {
-        supervisor.stopped(0, Policy::Temporary, Exit::Abnormal, tick * SECOND);
+        assert_eq!(
+            supervisor.stopped(0, Policy::Temporary, Exit::Abnormal, seconds(tick)),
+            Ok(Decision::Ignore)
+        );
     }
 
-    assert_eq!(supervisor.recent_restarts(50 * SECOND), 0);
-    assert!(!supervisor.terminated());
+    assert_eq!(supervisor, before);
+    assert_eq!(supervisor.recent_restarts(seconds(50)), 0);
 }
 
 #[test]
-fn exceeding_the_intensity_escalates_and_stays_escalated() {
-    let mut supervisor: Supervisor<3, 8> =
-        Supervisor::new(Strategy::OneForOne, Intensity::new(2, MINUTE));
+fn exceeding_the_intensity_escalates_once_and_stays_terminated() {
+    let mut supervisor = small::<8>(2, MINUTE);
 
-    assert!(matches!(
-        supervisor.stopped(0, Policy::Permanent, Exit::Abnormal, 0),
-        Decision::Restart(_)
-    ));
-    assert!(matches!(
-        supervisor.stopped(0, Policy::Permanent, Exit::Abnormal, SECOND),
-        Decision::Restart(_)
-    ));
     assert_eq!(
-        supervisor.stopped(0, Policy::Permanent, Exit::Abnormal, 2 * SECOND),
-        Decision::Escalate
+        supervisor.stopped(0, BAD.0, BAD.1, Duration::ZERO),
+        restart(0, 0)
     );
-
+    assert_eq!(supervisor.stopped(0, BAD.0, BAD.1, SECOND), restart(0, 0));
+    assert_eq!(
+        supervisor.stopped(0, BAD.0, BAD.1, seconds(2)),
+        Ok(Decision::Escalate)
+    );
     assert!(supervisor.terminated());
-    assert_eq!(
-        supervisor.stopped(1, Policy::Temporary, Exit::Normal, 3 * SECOND),
-        Decision::Escalate
+    assert!(
+        supervisor
+            .history()
+            .eq([Duration::ZERO, SECOND, seconds(2)])
     );
+
+    // The repeat is honoured, says so, and records nothing: not even the clock.
+    let before = supervisor;
+    for (policy, exit) in [BAD, (Policy::Temporary, Exit::Normal)] {
+        assert_eq!(
+            supervisor.stopped(1, policy, exit, seconds(3)),
+            Ok(Decision::AlreadyEscalated)
+        );
+        assert_eq!(supervisor, before);
+    }
 }
 
 #[test]
 fn restarts_outside_the_window_stop_counting() {
-    let mut supervisor: Supervisor<3, 8> =
-        Supervisor::new(Strategy::OneForOne, Intensity::new(1, 5 * SECOND));
-    supervisor.stopped(0, Policy::Permanent, Exit::Abnormal, 0);
+    let mut supervisor = small::<8>(1, seconds(5));
+    assert!(supervisor.stopped(0, BAD.0, BAD.1, Duration::ZERO).is_ok());
 
     assert_eq!(supervisor.recent_restarts(SECOND), 1);
-    assert_eq!(supervisor.recent_restarts(10 * SECOND), 0);
+    assert_eq!(supervisor.recent_restarts(seconds(10)), 0);
 
-    assert!(matches!(
-        supervisor.stopped(0, Policy::Permanent, Exit::Abnormal, 10 * SECOND),
-        Decision::Restart(_)
-    ));
+    assert_eq!(
+        supervisor.stopped(0, BAD.0, BAD.1, seconds(10)),
+        restart(0, 0)
+    );
     assert!(!supervisor.terminated());
 }
 
 #[test]
 fn the_strategy_does_not_change_how_fast_the_intensity_is_spent() {
-    let intensity = Intensity::new(1, MINUTE);
-    let mut wide: Supervisor<3, 16> = Supervisor::new(Strategy::OneForAll, intensity);
-    let mut narrow: Supervisor<3, 16> = Supervisor::new(Strategy::OneForOne, intensity);
+    let intensity = intensity(1, MINUTE);
+    let mut wide: Supervisor<3, 16> = some(Supervisor::new(Strategy::OneForAll, intensity));
+    let mut narrow: Supervisor<3, 16> = some(Supervisor::new(Strategy::OneForOne, intensity));
 
-    wide.stopped(0, Policy::Permanent, Exit::Abnormal, 0);
-    narrow.stopped(0, Policy::Permanent, Exit::Abnormal, 0);
+    assert!(wide.stopped(0, BAD.0, BAD.1, Duration::ZERO).is_ok());
+    assert!(narrow.stopped(0, BAD.0, BAD.1, Duration::ZERO).is_ok());
 
-    assert_eq!(wide.recent_restarts(0), narrow.recent_restarts(0));
-    assert_eq!(wide.recent_restarts(0), 1);
-
+    assert_eq!(wide.recent_restarts(Duration::ZERO), 1);
+    assert_eq!(narrow.recent_restarts(Duration::ZERO), 1);
     assert_eq!(
-        wide.stopped(0, Policy::Permanent, Exit::Abnormal, SECOND),
-        Decision::Escalate
+        wide.stopped(0, BAD.0, BAD.1, SECOND),
+        Ok(Decision::Escalate)
     );
     assert_eq!(
-        narrow.stopped(0, Policy::Permanent, Exit::Abnormal, SECOND),
-        Decision::Escalate
+        narrow.stopped(0, BAD.0, BAD.1, SECOND),
+        Ok(Decision::Escalate)
     );
 }
 
@@ -164,154 +176,56 @@ fn the_strategy_does_not_change_how_fast_the_intensity_is_spent() {
 /// ceiling, and falls back to the base once the window has slid past them.
 #[test]
 fn the_restart_delay_backs_off_and_recovers() {
-    const MS: u64 = 1_000_000;
-    let mut tree: Supervisor<1, 16> =
-        Supervisor::new(Strategy::OneForOne, Intensity::new(8, 60_000 * MS));
+    let ms = Duration::from_millis;
+    let mut tree: Supervisor<1, 16> = some(Supervisor::new(
+        Strategy::OneForOne,
+        intensity(8, ms(60_000)),
+    ));
 
-    let delays: [u64; 5] = core::array::from_fn(|attempt| {
-        let now = attempt as u64 * MS;
-        tree.stopped(0, Policy::Permanent, Exit::Abnormal, now);
-        tree.restart_delay_ns(100 * MS, 800 * MS, now)
+    let delays: [Duration; 5] = core::array::from_fn(|attempt| {
+        let now = ms(attempt as u64);
+        assert!(tree.stopped(0, BAD.0, BAD.1, now).is_ok());
+        tree.restart_delay(ms(100), ms(800), now)
     });
-    assert_eq!(delays, [100 * MS, 200 * MS, 400 * MS, 800 * MS, 800 * MS]);
+    assert_eq!(delays, [ms(100), ms(200), ms(400), ms(800), ms(800)]);
 
-    assert_eq!(
-        tree.restart_delay_ns(100 * MS, 800 * MS, 120_000 * MS),
-        100 * MS
-    );
+    assert_eq!(tree.restart_delay(ms(100), ms(800), ms(120_000)), ms(100));
 }
 
-/// A base past the ceiling is still capped, and no shift can overflow.
+/// A base past the ceiling is still capped, and no doubling can overflow.
 #[test]
 fn the_restart_delay_never_outruns_its_ceiling() {
-    let mut tree: Supervisor<1, 64> =
-        Supervisor::new(Strategy::OneForOne, Intensity::new(u32::MAX, u64::MAX));
-    for attempt in 0..64 {
-        tree.stopped(0, Policy::Permanent, Exit::Abnormal, attempt);
-    }
-    assert_eq!(tree.restart_delay_ns(u64::MAX, 5, 64), 5);
-    assert_eq!(tree.restart_delay_ns(1, u64::MAX, 64), 1 << 63);
-}
-
-/// What one process persisted rebuilds the same intensity window in another.
-#[test]
-fn a_restored_history_spends_the_budget_the_first_process_already_spent() {
-    let intensity = Intensity::new(2, MINUTE);
-    let mut first: Supervisor<1, 8> = Supervisor::new(Strategy::OneForOne, intensity);
-    first.stopped(0, Policy::Permanent, Exit::Abnormal, 10 * SECOND);
-    first.stopped(0, Policy::Permanent, Exit::Abnormal, 20 * SECOND);
-    assert!(first.history().eq([10 * SECOND, 20 * SECOND]));
-
-    let mut second: Supervisor<1, 8> = Supervisor::restore(
-        first.strategy(),
-        first.intensity(),
-        first.history(),
-        25 * SECOND,
-    );
-
-    assert!(second.history().eq(first.history()));
-    assert_eq!(second.recent_restarts(25 * SECOND), 2);
-    assert_eq!(
-        second.restart_delay_ns(SECOND, MINUTE, 25 * SECOND),
-        2 * SECOND
-    );
-    assert_eq!(
-        second.stopped(0, Policy::Permanent, Exit::Abnormal, 30 * SECOND),
-        Decision::Escalate
-    );
-}
-
-#[test]
-fn restoring_drops_restarts_the_window_has_slid_past() {
-    let saved = [SECOND, 2 * SECOND, 50 * SECOND, 55 * SECOND];
-    let tree: Supervisor<1, 8> = Supervisor::restore(
+    let nanos = Duration::from_nanos;
+    let mut tree: Supervisor<1, 128> = some(Supervisor::new(
         Strategy::OneForOne,
-        Intensity::new(5, 10 * SECOND),
-        saved,
-        MINUTE,
-    );
-
-    assert!(tree.history().eq([50 * SECOND, 55 * SECOND]));
-    assert_eq!(tree.recent_restarts(MINUTE), 2);
-}
-
-#[test]
-fn restoring_more_than_fits_keeps_the_newest() {
-    let tree: Supervisor<1, 4> = Supervisor::restore(
-        Strategy::OneForOne,
-        Intensity::new(3, MINUTE),
-        (1..=6).map(|tick| tick * SECOND),
-        10 * SECOND,
-    );
-
-    assert!(
-        tree.history()
-            .eq([3 * SECOND, 4 * SECOND, 5 * SECOND, 6 * SECOND])
-    );
-}
-
-/// A restart another process performed counts the same as one granted here.
-#[test]
-fn an_external_restart_spends_the_budget() {
-    let mut tree: Supervisor<1, 8> =
-        Supervisor::new(Strategy::OneForOne, Intensity::new(1, MINUTE));
-    tree.record_external_restart(SECOND);
-
-    assert!(!tree.terminated());
-    assert_eq!(tree.recent_restarts(SECOND), 1);
-    assert_eq!(tree.restart_delay_ns(SECOND, MINUTE, 2 * SECOND), SECOND);
-    assert_eq!(
-        tree.stopped(0, Policy::Permanent, Exit::Abnormal, 2 * SECOND),
-        Decision::Escalate
-    );
-}
-
-/// Two processes that each restarted the child merge into one window, in
-/// order, and the same history absorbed twice counts nothing twice.
-#[test]
-fn absorbing_merges_in_order_without_counting_twice() {
-    let intensity = Intensity::new(3, MINUTE);
-    let mut mine: Supervisor<1, 8> = Supervisor::new(Strategy::OneForOne, intensity);
-    mine.stopped(0, Policy::Permanent, Exit::Abnormal, 10 * SECOND);
-    mine.stopped(0, Policy::Permanent, Exit::Abnormal, 30 * SECOND);
-
-    let mut theirs: Supervisor<1, 8> = Supervisor::new(Strategy::OneForOne, intensity);
-    theirs.record_external_restart(10 * SECOND);
-    theirs.record_external_restart(20 * SECOND);
-
-    mine.absorb(theirs.history(), 31 * SECOND);
-    assert!(mine.history().eq([10 * SECOND, 20 * SECOND, 30 * SECOND]));
-
-    mine.absorb(theirs.history(), 32 * SECOND);
-    assert_eq!(mine.recent_restarts(32 * SECOND), 3);
-    assert_eq!(
-        mine.stopped(0, Policy::Permanent, Exit::Abnormal, 33 * SECOND),
-        Decision::Escalate
-    );
-}
-
-#[test]
-fn absorbing_ignores_restarts_outside_the_window() {
-    let mut tree: Supervisor<1, 8> =
-        Supervisor::new(Strategy::OneForOne, Intensity::new(2, 10 * SECOND));
-    tree.absorb([SECOND, 2 * SECOND, 55 * SECOND], MINUTE);
-
-    assert!(tree.history().eq([55 * SECOND]));
-    assert!(matches!(
-        tree.stopped(0, Policy::Permanent, Exit::Abnormal, MINUTE),
-        Decision::Restart(_)
+        intensity(127, Duration::MAX),
     ));
+    for attempt in 0..40 {
+        assert!(tree.stopped(0, BAD.0, BAD.1, nanos(attempt)).is_ok());
+    }
+    assert_eq!(
+        tree.restart_delay(Duration::MAX, nanos(5), nanos(40)),
+        nanos(5)
+    );
+    assert_eq!(
+        tree.restart_delay(nanos(1), Duration::MAX, nanos(40)),
+        nanos(1 << 39)
+    );
+    for attempt in 40..100 {
+        assert!(tree.stopped(0, BAD.0, BAD.1, nanos(attempt)).is_ok());
+    }
+    assert_eq!(
+        tree.restart_delay(nanos(1), Duration::MAX, nanos(100)),
+        Duration::MAX
+    );
 }
 
 #[test]
-fn a_full_history_lets_the_oldest_go_whichever_order_they_arrive() {
-    let mut tree: Supervisor<1, 3> =
-        Supervisor::new(Strategy::OneForOne, Intensity::new(2, MINUTE));
-    tree.record_external_restart(5 * SECOND);
-    tree.record_external_restart(3 * SECOND);
-    tree.record_external_restart(9 * SECOND);
-    tree.record_external_restart(7 * SECOND);
-    tree.record_external_restart(SECOND);
-
-    assert!(tree.history().eq([5 * SECOND, 7 * SECOND, 9 * SECOND]));
+fn a_shape_that_could_decide_nothing_does_not_exist() {
+    let window = intensity(3, MINUTE);
+    assert!(Supervisor::<0, 8>::new(Strategy::OneForOne, window).is_none());
+    assert!(Supervisor::<1, 3>::new(Strategy::OneForOne, window).is_none());
+    assert!(Supervisor::<1, 0>::new(Strategy::OneForOne, intensity(0, MINUTE)).is_none());
+    assert!(Supervisor::<1, 4>::new(Strategy::OneForOne, window).is_some());
+    assert!(Supervisor::<1, 3>::restore(Strategy::OneForOne, window, [], MINUTE).is_none());
 }

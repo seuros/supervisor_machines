@@ -7,6 +7,17 @@ on:
     branches: [ master ]
 
 jobs:
+  lint:
+    name: Dictator
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: seuros/setup-dictator@master
+        with:
+          version: '0.26.0'
+      - run: dictator lint --format github .
+
   crates:
     runs-on: ubuntu-latest
     steps:
@@ -32,21 +43,19 @@ jobs:
           echo "core=$core" >> "$GITHUB_OUTPUT"
           echo "ffi=$ffi" >> "$GITHUB_OUTPUT"
 
-      - name: Lint and test every feature combination
+      # The core is plainly no_std and has no features, so there is one
+      # combination to lint and test.
+      - name: Lint and test the core
         if: steps.crates.outputs.core != ''
         working-directory: ${{ steps.crates.outputs.core }}
         run: |
-          for features in "" alloc std; do
-            echo "::group::features: ${features:-none}"
-            cargo clippy --no-default-features --features "$features" --all-targets -- -D warnings
-            cargo test --no-default-features --features "$features" --lib
-            echo "::endgroup::"
-          done
+          cargo clippy --all-targets -- -D warnings
+          cargo test --lib
 
       - name: Run doc tests
         if: steps.crates.outputs.core != ''
         working-directory: ${{ steps.crates.outputs.core }}
-        run: cargo test --all-features --doc
+        run: cargo test --doc
 
       - name: Lint the binding crate
         if: steps.crates.outputs.ffi != ''
@@ -79,12 +88,8 @@ jobs:
         if: steps.crates.outputs.core != ''
         working-directory: ${{ steps.crates.outputs.core }}
         run: |
-          for features in "" alloc; do
-            echo "::group::thumbv7em features: ${features:-none}"
-            cargo build --no-default-features --features "$features" --target thumbv7em-none-eabihf
-            cargo clippy --no-default-features --features "$features" --target thumbv7em-none-eabihf -- -D warnings
-            echo "::endgroup::"
-          done
+          cargo build --target thumbv7em-none-eabihf
+          cargo clippy --target thumbv7em-none-eabihf -- -D warnings
 
   ruby:
     runs-on: ubuntu-latest

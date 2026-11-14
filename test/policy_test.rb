@@ -12,7 +12,7 @@ module SupervisorMachines
       @nursery.finish(:b)
 
       assert_equal :b, @nursery.next_start
-      supervisor.stop(grace: Nursery::PATIENCE)
+      supervisor.stop(Nursery::PATIENCE_NS)
     end
 
     def test_a_transient_child_is_left_alone_after_a_clean_exit
@@ -24,7 +24,7 @@ module SupervisorMachines
 
       assert_equal :b, @nursery.next_stop
       assert_nil @nursery.next_start(Nursery::QUIET)
-      supervisor.stop(grace: Nursery::PATIENCE)
+      supervisor.stop(Nursery::PATIENCE_NS)
     end
 
     def test_a_transient_child_comes_back_from_a_bad_exit
@@ -35,7 +35,7 @@ module SupervisorMachines
       @nursery.finish(:b, :abnormal)
 
       assert_equal :b, @nursery.next_start
-      supervisor.stop(grace: Nursery::PATIENCE)
+      supervisor.stop(Nursery::PATIENCE_NS)
     end
 
     def test_a_temporary_child_is_never_restarted
@@ -52,11 +52,11 @@ module SupervisorMachines
       assert_equal :a, @nursery.next_stop
       assert_nil @nursery.next_start(Nursery::QUIET)
       refute_predicate supervisor, :terminated?
-      supervisor.stop(grace: Nursery::PATIENCE)
+      supervisor.stop(Nursery::PATIENCE_NS)
     end
 
     def test_a_group_restart_does_not_bring_a_stopped_temporary_child_back
-      supervisor = Supervisor.new(strategy: :one_for_all, backoff: IMMEDIATE)
+      supervisor = Supervisor.new(:one_for_all, Intensity.default, backoff: IMMEDIATE)
       supervisor.supervise(:once, policy: :temporary, &@nursery.starter(:once))
       supervisor.supervise(:always, &@nursery.starter(:always))
       supervisor.start
@@ -73,7 +73,7 @@ module SupervisorMachines
       assert_equal :always, @nursery.next_start
       assert_nil @nursery.next_start(Nursery::QUIET)
 
-      supervisor.stop(grace: Nursery::PATIENCE)
+      supervisor.stop(Nursery::PATIENCE_NS)
     end
   end
 end

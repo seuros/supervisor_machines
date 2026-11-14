@@ -4,25 +4,42 @@ require 'test_helper'
 
 module SupervisorMachines
   class ArgumentsTest < Test
-    def test_an_unknown_strategy_is_rejected
-      assert_raises(ArgumentError) { Supervisor.new(strategy: :one_for_some) }
+    def fresh(strategy = :one_for_one)
+      Supervisor.new(strategy, Intensity.default, backoff: IMMEDIATE)
     end
 
-    def test_an_unknown_policy_is_rejected
-      supervisor = Supervisor.new
+    def test_a_tree_is_built_from_what_the_core_accepts
+      assert_raises(RangeError) { Supervisor.new(:one_for_some, Intensity.default) }
+      assert_raises(TypeError) { Supervisor.new('one_for_one', Intensity.default) }
+      assert_raises(TypeError) { Supervisor.new(:one_for_one, [1, MINUTE]) }
+      error = assert_raises(RangeError) do
+        Supervisor.new(:one_for_one, Intensity.new(Decider::MAX_RESTARTS + 1, MINUTE))
+      end
+      assert_includes error.message, Decider::MAX_RESTARTS.to_s
 
-      assert_raises(ArgumentError) { supervisor.supervise(:a, policy: :eternal, &@nursery.starter(:a)) }
+      supervisor = Supervisor.new(:rest_for_one, Intensity.new(3, MINUTE))
+
+      assert_equal [:rest_for_one, Intensity.new(3, MINUTE), 0],
+                   [supervisor.strategy, supervisor.intensity, supervisor.restarts]
     end
 
-    def test_a_child_count_without_a_shape_is_rejected
-      supervisor = Supervisor.new
+    def test_an_unknown_policy_is_out_of_range
+      supervisor = fresh
+
+      assert_raises(RangeError) { supervisor.supervise(:a, policy: :eternal, &@nursery.starter(:a)) }
+      assert_raises(TypeError) { supervisor.supervise(:a, policy: 'permanent', &@nursery.starter(:a)) }
+      assert_empty supervisor.children
+    end
+
+    def test_a_child_count_without_a_shape_is_out_of_range
+      supervisor = fresh
       (Decider::SUPPORTED_CHILDREN.max - 1).times { |index| supervisor.supervise(index, &@nursery.starter(index)) }
 
-      assert_raises(ArgumentError) { supervisor.start }
+      assert_raises(RangeError) { supervisor.start }
     end
 
-    def test_a_tree_with_no_children_is_rejected
-      assert_raises(ArgumentError) { Supervisor.new.start }
+    def test_a_tree_with_no_children_is_out_of_range
+      assert_raises(RangeError) { fresh.start }
     end
 
     def test_a_started_tree_takes_on_no_more_children
@@ -33,26 +50,20 @@ module SupervisorMachines
       assert_equal %i[a], supervisor.children
       assert_nil @nursery.next_start(Nursery::QUIET)
 
-      supervisor.stop(grace: Nursery::PATIENCE)
+      supervisor.stop(Nursery::PATIENCE_NS)
     end
 
-    def test_a_tree_that_never_started_has_no_restarts
-      assert_equal 0, Supervisor.new.restarts
-    end
+    def test_a_grace_is_integer_nanoseconds_checked_before_anything_stops
+      supervisor = tree(%i[a])
 
-    def test_a_child_index_outside_the_tree_is_refused
-      decider = Decider.new(children: 2, strategy: :rest_for_one, restarts: 3, window_ns: 1_000)
+      assert_equal :a, @nursery.next_start
+      assert_raises(TypeError) { supervisor.stop(2.0) }
+      assert_raises(RangeError) { supervisor.stop(-1) }
+      assert_nil @nursery.next_stop(Nursery::QUIET)
 
-      assert_raises(ArgumentError) do
-        decider.stopped(index: 2, policy: :permanent, exit: :abnormal, now_ns: 0)
-      end
-      assert_equal 0, decider.recent_restarts(0)
-    end
+      supervisor.stop(Nursery::PATIENCE_NS)
 
-    def test_an_intensity_the_history_cannot_enforce_is_refused
-      error = assert_raises(ArgumentError) { Supervisor.new(restarts: Decider::MAX_RESTARTS + 1) }
-
-      assert_includes error.message, Decider::MAX_RESTARTS.to_s
+      assert_equal :a, @nursery.next_stop
     end
   end
 end

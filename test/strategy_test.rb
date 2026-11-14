@@ -13,7 +13,7 @@ module SupervisorMachines
 
       assert_equal :b, @nursery.next_start
       assert_nil @nursery.next_start(Nursery::QUIET)
-      assert_same supervisor, supervisor.stop(grace: Nursery::PATIENCE)
+      assert_same supervisor, supervisor.stop(Nursery::PATIENCE_NS)
     end
 
     def test_one_for_all_restarts_every_child_whichever_one_died
@@ -25,7 +25,7 @@ module SupervisorMachines
 
       assert_equal %i[a b c], @nursery.starts(3)
       assert_nil @nursery.next_start(Nursery::QUIET)
-      supervisor.stop(grace: Nursery::PATIENCE)
+      supervisor.stop(Nursery::PATIENCE_NS)
     end
 
     def test_rest_for_one_restarts_the_child_and_everything_started_after_it
@@ -37,7 +37,7 @@ module SupervisorMachines
 
       assert_equal %i[b c d], @nursery.starts(3)
       assert_nil @nursery.next_start(Nursery::QUIET)
-      supervisor.stop(grace: Nursery::PATIENCE)
+      supervisor.stop(Nursery::PATIENCE_NS)
     end
 
     def test_the_largest_shape_restarts_the_whole_set
@@ -49,7 +49,7 @@ module SupervisorMachines
       @nursery.finish(17, :abnormal)
 
       assert_equal names, @nursery.starts(names.size)
-      supervisor.stop(grace: Nursery::PATIENCE)
+      supervisor.stop(Nursery::PATIENCE_NS)
     end
   end
 end

@@ -15,10 +15,5 @@ exclude = ["src/**/tests.rs", "tests/"]
 name = "supervisor_machines"
 crate-type = ["lib"]
 
-[features]
-default = ["std"]
-std = ["alloc"]
-alloc = []
-
 [lints]
 workspace = true
