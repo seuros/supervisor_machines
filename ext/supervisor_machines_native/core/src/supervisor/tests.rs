@@ -1,5 +1,7 @@
 use core::time::Duration;
 
+use matryona_machines::testing::unchanged;
+
 use crate::tests::some;
 use crate::{Decision, Exit, Intensity, Policy, Span, Strategy, Supervisor};
 
@@ -92,16 +94,15 @@ fn the_policy_decides_whether_a_child_restarts() {
 #[test]
 fn an_ignored_stop_changes_nothing() {
     let mut supervisor = small::<8>(1, MINUTE);
-    let before = supervisor;
-
     for tick in 0..50 {
         assert_eq!(
-            supervisor.stopped(0, Policy::Temporary, Exit::Abnormal, seconds(tick)),
+            unchanged(&mut supervisor, |s| {
+                s.stopped(0, Policy::Temporary, Exit::Abnormal, seconds(tick))
+            }),
             Ok(Decision::Ignore)
         );
     }
 
-    assert_eq!(supervisor, before);
     assert_eq!(supervisor.recent_restarts(seconds(50)), 0);
 }
 
@@ -126,13 +127,11 @@ fn exceeding_the_intensity_escalates_once_and_stays_terminated() {
     );
 
     // The repeat is honoured, says so, and records nothing: not even the clock.
-    let before = supervisor;
     for (policy, exit) in [BAD, (Policy::Temporary, Exit::Normal)] {
         assert_eq!(
-            supervisor.stopped(1, policy, exit, seconds(3)),
+            unchanged(&mut supervisor, |s| s.stopped(1, policy, exit, seconds(3))),
             Ok(Decision::AlreadyEscalated)
         );
-        assert_eq!(supervisor, before);
     }
 }
 

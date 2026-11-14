@@ -4,28 +4,31 @@
 //! so a runtime child count is dispatched to one monomorphised shape per
 //! supported count and kept behind [`Decide`].
 //!
-//! Every mutating method converts and checks all of its arguments, and looks
-//! up every class it answers with, before it calls the core; afterwards it
+//! Every mutating method checks frozen first, then converts and checks all of
+//! its arguments and looks up every class it answers with, before it calls
+//! the core; afterwards it
 //! only builds values from what the core returned. `stopped` answers with a
-//! `Restart` built by Ruby, so it decides on a copy and keeps the copy only
-//! once that answer exists and the decider is neither frozen nor changed: a
-//! raise while building it changes nothing, freezing the decider meanwhile
-//! raises `FrozenError` and a re-entrant change `RuntimeError`, in both cases
-//! with the outer call not applied. No `RefCell` borrow is held while Ruby
-//! code runs.
+//! `Restart` built by Ruby, so it runs in `matryona_machines`'s
+//! clone-then-keep: decided on a copy, kept only once that answer exists and
+//! the decider is neither frozen nor changed. A raise while building it
+//! changes nothing, freezing the decider meanwhile raises `FrozenError` and a
+//! re-entrant change `RuntimeError`, in both cases with the outer call not
+//! applied. No `RefCell` borrow is held while Ruby code runs.
 
 use std::cell::RefCell;
+use std::ops::{Deref, DerefMut};
 use std::time::Duration;
 
 use magnus::typed_data::Obj;
-use magnus::{Error, RArray, RModule, Ruby, TryConvert, Value, function, method, prelude::*};
+use magnus::{Error, Integer, RArray, RModule, Ruby, Value, function, method, prelude::*};
+use matryona_machines::ruby::{Symbols, duration, exact_array, integer, keep, nanoseconds};
 use supervisor_machines::{
     Decision, Exit, Intensity, Policy, Recording, Refusal, Span, Strategy, Supervisor,
 };
 
 use crate::{
-    DecisionClasses, Nanos, Whole, exit, frozen, intensity_from, intensity_value, nanos, policy,
-    recording_name, refusal_name, strategy, strategy_name,
+    DecisionClasses, Exits, Policies, Recordings, Refusals, Strategies, frozen, intensity_from,
+    intensity_value,
 };
 
 /// Restart instants every shape keeps.
@@ -129,6 +132,36 @@ impl<const CHILDREN: usize> Decide for Shape<CHILDREN> {
     }
 }
 
+/// A decider's tree, copied by [`Decide::duplicate`] and compared by
+/// [`Decide::same`], so clone-then-keep can hold it.
+struct Tree(Box<dyn Decide>);
+
+impl Clone for Tree {
+    fn clone(&self) -> Self {
+        Self(self.0.duplicate())
+    }
+}
+
+impl PartialEq for Tree {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.same(&*other.0)
+    }
+}
+
+impl Deref for Tree {
+    type Target = dyn Decide;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.0
+    }
+}
+
+impl DerefMut for Tree {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.0
+    }
+}
+
 /// A saved history and the instant it is restored at.
 type Saved<'a> = Option<(&'a [Duration], Duration)>;
 
@@ -178,17 +211,18 @@ fn shape(
     }
 }
 
-/// Integer nanosecond instants, all converted before the core sees any.
-fn instants(value: Value) -> Result<Vec<Duration>, Error> {
-    let array = RArray::try_convert(value)?;
+/// Integer nanosecond instants, all converted before the core sees any. Only
+/// an `Array` is read, never a subclass that could answer for its elements.
+fn instants(ruby: &Ruby, value: Value) -> Result<Vec<Duration>, Error> {
+    let array = exact_array(ruby, value, "history must be an Array of Integers")?;
     array
         .into_iter()
-        .map(|item| Nanos::try_convert(item).map(|Nanos(at)| at))
+        .map(|item| duration(item, "history"))
         .collect()
 }
 
 #[magnus::wrap(class = "SupervisorMachines::Decider", free_immediately, size)]
-struct Wrapper(RefCell<Box<dyn Decide>>);
+struct Wrapper(RefCell<Tree>);
 
 impl Wrapper {
     /// `RangeError` for a child count with no shape, and for an intensity the
@@ -200,8 +234,9 @@ impl Wrapper {
         intensity: Value,
         saved: Saved<'_>,
     ) -> Result<Self, Error> {
-        let Whole(children) = Whole::<usize>::try_convert(children)?;
-        let (strategy, intensity) = (strategy(ruby, name)?, intensity_from(ruby, intensity)?);
+        let children: usize = integer(children, "children")?;
+        let strategy = Strategies::parse(ruby, name)?;
+        let intensity = intensity_from(ruby, intensity)?;
         if !SUPPORTED_CHILDREN.contains(&children) {
             return Err(Error::new(
                 ruby.exception_range_error(),
@@ -220,7 +255,7 @@ impl Wrapper {
                 ),
             )
         })?;
-        Ok(Self(RefCell::new(tree)))
+        Ok(Self(RefCell::new(Tree(tree))))
     }
 
     fn new(ruby: &Ruby, children: Value, name: Value, intensity: Value) -> Result<Self, Error> {
@@ -235,7 +270,7 @@ impl Wrapper {
         history: Value,
         now: Value,
     ) -> Result<Self, Error> {
-        let (history, Nanos(now)) = (instants(history)?, Nanos::try_convert(now)?);
+        let (history, now) = (instants(ruby, history)?, duration(now, "now")?);
         Self::build(ruby, children, name, intensity, Some((&history, now)))
     }
 
@@ -251,54 +286,49 @@ impl Wrapper {
         now: Value,
     ) -> Result<Value, Error> {
         rb_self.check_frozen()?;
-        let Whole(index) = Whole::<usize>::try_convert(index)?;
-        let (policy, ending) = (policy(ruby, name)?, exit(ruby, ending)?);
-        let Nanos(now) = Nanos::try_convert(now)?;
+        let index: usize = integer(index, "index")?;
+        let (policy, ending) = (Policies::parse(ruby, name)?, Exits::parse(ruby, ending)?);
+        let now = duration(now, "now")?;
         let classes = DecisionClasses::fetch(ruby)?;
-        let before = rb_self.0.borrow().duplicate();
-        let mut after = before.duplicate();
-        let answer = match after.stopped(index, policy, ending, now) {
-            Ok(decision) => classes.decision(ruby, decision)?,
-            Err(refusal) => ruby.to_symbol(refusal_name(refusal)).as_value(),
-        };
-        // The answer ran Ruby code: it may have frozen or changed the decider.
-        rb_self.check_frozen()?;
-        let mut held = rb_self.0.borrow_mut();
-        if !held.same(&*before) {
-            return Err(Error::new(
-                ruby.exception_runtime_error(),
-                "the decider changed while the answer was built; the call was not applied",
-            ));
-        }
-        *held = after;
-        Ok(answer)
+        keep(
+            ruby,
+            rb_self,
+            &rb_self.0,
+            |tree| tree.stopped(index, policy, ending, now),
+            |decided| match decided {
+                Ok(decision) => classes.decision(ruby, decision),
+                Err(refusal) => Ok(Refusals::symbol(ruby, refusal).as_value()),
+            },
+        )
     }
 
     /// `:recorded` or `:outdated`. Never refused.
     fn record_external_restart(
         ruby: &Ruby,
         rb_self: Obj<Self>,
-        Nanos(now): Nanos,
+        now: Value,
     ) -> Result<Value, Error> {
         rb_self.check_frozen()?;
+        let now = duration(now, "now")?;
         let recording = rb_self.0.borrow_mut().record_external_restart(now);
-        Ok(ruby.to_symbol(recording_name(recording)).as_value())
+        Ok(Recordings::symbol(ruby, recording).as_value())
     }
 
     /// How many restarts were added, keeping the larger count of each
     /// instant across both histories. Never refused.
-    fn absorb(rb_self: Obj<Self>, history: Value, Nanos(now): Nanos) -> Result<usize, Error> {
+    fn absorb(ruby: &Ruby, rb_self: Obj<Self>, history: Value, now: Value) -> Result<usize, Error> {
         rb_self.check_frozen()?;
-        let history = instants(history)?;
+        let (history, now) = (instants(ruby, history)?, duration(now, "now")?);
         Ok(rb_self.0.borrow_mut().absorb(&history, now))
     }
 
     fn history(ruby: &Ruby, rb_self: &Self) -> Result<RArray, Error> {
         let held = rb_self.0.borrow().history();
-        frozen(ruby, held.into_iter().map(|at| nanos(ruby, at)))
+        frozen(ruby, held.into_iter().map(|at| nanoseconds(ruby, at)))
     }
 
-    fn span(ruby: &Ruby, rb_self: &Self, Whole(index): Whole<usize>) -> Result<Value, Error> {
+    fn span(ruby: &Ruby, rb_self: &Self, index: Value) -> Result<Value, Error> {
+        let index: usize = integer(index, "index")?;
         let classes = DecisionClasses::fetch(ruby)?;
         let span = rb_self.0.borrow().span(index);
         span.map_or_else(|| Ok(ruby.qnil().as_value()), |span| classes.span(span))
@@ -309,8 +339,8 @@ impl Wrapper {
     }
 
     fn strategy(ruby: &Ruby, rb_self: &Self) -> Value {
-        ruby.to_symbol(strategy_name(rb_self.0.borrow().strategy()))
-            .as_value()
+        let strategy = rb_self.0.borrow().strategy();
+        Strategies::symbol(ruby, strategy).as_value()
     }
 
     fn intensity(ruby: &Ruby, rb_self: &Self) -> Result<Value, Error> {
@@ -323,18 +353,24 @@ impl Wrapper {
         self.0.borrow().terminated()
     }
 
-    fn recent_restarts(&self, Nanos(now): Nanos) -> u32 {
-        self.0.borrow().recent_restarts(now)
+    fn recent_restarts(&self, now: Value) -> Result<u32, Error> {
+        let now = duration(now, "now")?;
+        Ok(self.0.borrow().recent_restarts(now))
     }
 
     fn restart_delay(
         ruby: &Ruby,
         rb_self: &Self,
-        Nanos(base): Nanos,
-        Nanos(ceiling): Nanos,
-        Nanos(now): Nanos,
-    ) -> Value {
-        nanos(ruby, rb_self.0.borrow().restart_delay(base, ceiling, now))
+        base: Value,
+        ceiling: Value,
+        now: Value,
+    ) -> Result<Integer, Error> {
+        let (base, ceiling) = (duration(base, "base")?, duration(ceiling, "ceiling")?);
+        let now = duration(now, "now")?;
+        Ok(nanoseconds(
+            ruby,
+            rb_self.0.borrow().restart_delay(base, ceiling, now),
+        ))
     }
 
     fn inspect(ruby: &Ruby, rb_self: &Self) -> String {

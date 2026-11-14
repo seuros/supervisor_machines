@@ -6,6 +6,8 @@ use core::assert_matches;
 use core::time::Duration;
 use std::vec::Vec;
 
+use matryona_machines::testing::unchanged;
+
 use super::{BAD, MINUTE, SECOND, intensity, seconds, small, some};
 use crate::{Decision, Recording, Strategy, Supervisor};
 
@@ -145,9 +147,7 @@ fn absorbing_merges_in_order_without_counting_twice() {
     assert_eq!(mine.absorb(&shared, seconds(31)), 1);
     assert!(mine.history().eq([seconds(10), seconds(20), seconds(30)]));
 
-    let before = mine;
-    assert_eq!(mine.absorb(&shared, seconds(32)), 0);
-    assert_eq!(mine, before);
+    assert_eq!(unchanged(&mut mine, |m| m.absorb(&shared, seconds(32))), 0);
     assert_eq!(mine.recent_restarts(seconds(32)), 3);
     assert_eq!(
         mine.stopped(0, BAD.0, BAD.1, seconds(33)),
@@ -179,11 +179,15 @@ fn a_full_history_lets_the_oldest_go_whichever_order_they_arrive() {
     assert!(tree.history().eq([seconds(5), seconds(7), seconds(9)]));
 
     // Older than everything a full history holds: honoured, nothing changed.
-    let before = tree;
-    assert_eq!(tree.record_external_restart(SECOND), Recording::Outdated);
-    assert_eq!(tree, before);
-    assert_eq!(tree.absorb(&[SECOND, Duration::ZERO], seconds(9)), 0);
-    assert_eq!(tree, before);
+    assert_eq!(
+        unchanged(&mut tree, |t| t.record_external_restart(SECOND)),
+        Recording::Outdated
+    );
+    assert_eq!(
+        unchanged(&mut tree, |t| t
+            .absorb(&[SECOND, Duration::ZERO], seconds(9))),
+        0
+    );
 }
 
 /// Absorbing is a max-multiplicity merge: each instant ends up held as many
@@ -197,12 +201,15 @@ fn absorbing_keeps_the_larger_count_of_each_instant() {
     assert_eq!(mine.absorb(&[seconds(10), seconds(10)], seconds(11)), 1);
     assert!(mine.history().eq([seconds(10), seconds(10)]));
 
-    let before = mine;
-    assert_eq!(mine.absorb(&[seconds(10), seconds(10)], seconds(12)), 0);
-    assert_eq!(mine, before);
-
-    assert_eq!(mine.absorb(&[seconds(10)], seconds(13)), 0);
-    assert_eq!(mine, before);
+    assert_eq!(
+        unchanged(&mut mine, |m| m
+            .absorb(&[seconds(10), seconds(10)], seconds(12))),
+        0
+    );
+    assert_eq!(
+        unchanged(&mut mine, |m| m.absorb(&[seconds(10)], seconds(13))),
+        0
+    );
     assert_eq!(mine.recent_restarts(seconds(13)), 2);
 }
 
@@ -238,12 +245,12 @@ fn absorbing_past_a_full_history_keeps_the_newest() {
     tree.record_external_restart(seconds(7));
 
     // A third 5 would only swap an equal 5 out: nothing added.
-    let before = tree;
     assert_eq!(
-        tree.absorb(&[seconds(5), seconds(5), seconds(5)], seconds(9)),
+        unchanged(&mut tree, |t| {
+            t.absorb(&[seconds(5), seconds(5), seconds(5)], seconds(9))
+        }),
         0
     );
-    assert_eq!(tree, before);
 
     // 9 and 8 push both 5s out; the 6 is older than all three left.
     let theirs = [seconds(9), seconds(6), seconds(8)];

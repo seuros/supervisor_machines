@@ -3,6 +3,8 @@
 use core::assert_matches;
 use core::time::Duration;
 
+use matryona_machines::testing::refuses;
+
 use super::{BAD, MINUTE, SECOND, small, tree};
 use crate::{Decision, Exit, Policy, Refusal, Strategy};
 
@@ -17,15 +19,12 @@ fn a_child_outside_the_tree_is_refused() {
     ] {
         let mut supervisor = tree::<3>(strategy);
         assert!(supervisor.stopped(0, BAD.0, BAD.1, SECOND).is_ok());
-        let before = supervisor;
 
         for index in [3, 7, usize::MAX] {
             for (policy, exit) in [BAD, (Policy::Temporary, Exit::Normal)] {
-                assert_eq!(
-                    supervisor.stopped(index, policy, exit, MINUTE),
-                    Err(Refusal::UnknownChild)
-                );
-                assert_eq!(supervisor, before);
+                refuses(&mut supervisor, Refusal::UnknownChild, |s| {
+                    s.stopped(index, policy, exit, MINUTE)
+                });
             }
             assert_eq!(supervisor.span(index), None);
         }
@@ -40,13 +39,10 @@ fn a_child_outside_a_terminated_tree_is_still_refused() {
         supervisor.stopped(0, BAD.0, BAD.1, SECOND),
         Ok(Decision::Escalate)
     );
-    let before = supervisor;
 
-    assert_eq!(
-        supervisor.stopped(3, BAD.0, BAD.1, MINUTE),
-        Err(Refusal::UnknownChild)
-    );
-    assert_eq!(supervisor, before);
+    refuses(&mut supervisor, Refusal::UnknownChild, |s| {
+        s.stopped(3, BAD.0, BAD.1, MINUTE)
+    });
 }
 
 /// A refusal records no clock, so the refused instant constrains nothing.

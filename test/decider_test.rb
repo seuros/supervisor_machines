@@ -131,6 +131,8 @@ module SupervisorMachines
       assert_raises(TypeError) { tree.absorb([SECOND, 2.5], 3 * SECOND) }
       assert_raises(RangeError) { tree.absorb([SECOND, -1], 3 * SECOND) }
       assert_raises(TypeError) { tree.absorb(SECOND, 3 * SECOND) }
+      assert_raises(TypeError) { tree.absorb(Class.new(Array).new([SECOND]), 3 * SECOND) } # an Array subclass
+      assert_raises(TypeError) { Decider.restore(1, :one_for_one, Intensity.new(2, 60), Class.new(Array).new, 0) }
       assert_empty tree.history
     end
 
@@ -238,6 +240,10 @@ module SupervisorMachines
       assert_raises(FrozenError) { tree.stopped(0, :permanent, :abnormal, 0) }
       assert_raises(FrozenError) { tree.record_external_restart(0) }
       assert_raises(FrozenError) { tree.absorb([0], 0) }
+      # Frozen is checked before any argument is read.
+      assert_raises(FrozenError) { tree.stopped(-1, :bogus, nil, 1.5) }
+      assert_raises(FrozenError) { tree.record_external_restart(-1) }
+      assert_raises(FrozenError) { tree.absorb(:history, 1.5) }
       assert_empty tree.history
     end
   end

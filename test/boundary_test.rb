@@ -43,6 +43,15 @@ module SupervisorMachines
       assert_raises(TypeError) { Restart.new(span) }
     end
 
+    # A singleton class opened on a genuine value does not change what it is.
+    def test_an_opened_singleton_class_is_still_the_gems_value
+      intensity = Intensity.new(2, 60).tap(&:singleton_class)
+
+      assert_equal Intensity.new(2, 60), Decider.new(1, :one_for_one, intensity).intensity
+      assert_equal Intensity.new(2, 60), Decider.restore(1, :one_for_one, intensity, [5], 10).intensity
+      assert_equal Intensity.new(2, 60), Supervisor.new(:one_for_one, intensity).intensity
+    end
+
     def test_a_marshal_edited_value_is_revalidated_into_a_range_error
       intensity = Marshal.load(Marshal.dump(Intensity.new(2, 60)).sub('iA'.b, "i\x00".b))
 
@@ -56,6 +65,25 @@ module SupervisorMachines
       assert_equal [1, 0], [span.first, span.last]
       assert_raises(RangeError) { Restart.new(span) }
     end
+
+    # Fields are read from the struct itself: a redefined reader is never
+    # called, so it can neither lie nor re-enter. `Restart` checks its span
+    # natively, not with a Ruby `instance_of?`.
+    def test_a_redefined_reader_is_ignored
+      intensity = Intensity.new(2, 60)
+      span = Span.new(1, 2)
+      redefined(Intensity => %i[restarts window], Span => %i[first last]) do
+        assert_equal 1, Decider.new(1, :one_for_one, intensity).children
+        assert_equal 1, Decider.restore(1, :one_for_one, intensity, [5], 10).children
+        Restart.new(span)
+      end
+      forger = forge(Span, 'Span')
+      forger.define_method(:instance_of?) { |_| true }
+      forger.define_method(:class) { Span }
+
+      assert_raises(TypeError) { Restart.new(forger.new(first: 1, last: 2)) }
+    end
+
     def test_classes_held_by_the_binding_survive_gc_compaction
       decider = Decider.new(1, :one_for_one, Intensity.new(3, 60_000_000_000))
       # Compacting moves every unpinned object: a class the binding holds
@@ -65,5 +93,24 @@ module SupervisorMachines
       assert_equal Intensity.new(3, 60_000_000_000), decider.intensity
     end
 
+    private
+
+    # Runs the block with every listed reader raising if called.
+    def redefined(readers)
+      readers.each do |klass, names|
+        names.each do |name|
+          klass.alias_method(:"__real_#{name}", name)
+          klass.define_method(name) { raise "#{name} reader called" }
+        end
+      end
+      yield
+    ensure
+      readers.each do |klass, names|
+        names.each do |name|
+          klass.alias_method(name, :"__real_#{name}")
+          klass.remove_method(:"__real_#{name}")
+        end
+      end
+    end
   end
 end

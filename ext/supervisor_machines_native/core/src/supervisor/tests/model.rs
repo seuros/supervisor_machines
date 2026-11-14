@@ -7,27 +7,13 @@ extern crate std;
 use core::time::Duration;
 use std::vec::Vec;
 
+use matryona_machines::testing::{XorShift64, refuses, unchanged};
+
 use super::{intensity, some};
 use crate::{Decision, Exit, Policy, Recording, Refusal, Span, Strategy, Supervisor};
 
 const CHILDREN: usize = 5;
 const HISTORY: usize = 6;
-
-/// xorshift64*: deterministic, no dependency.
-struct Random(u64);
-
-impl Random {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, bound: u64) -> u64 {
-        self.next() % bound
-    }
-}
 
 struct Model {
     strategy: Strategy,
@@ -124,11 +110,13 @@ impl Model {
     }
 }
 
+/// The supervisor under test.
+type Real = Supervisor<CHILDREN, HISTORY>;
+
 fn run(seed: u64, strategy: Strategy, restarts: u32) {
     let window = Duration::from_nanos(40);
-    let mut random = Random(seed);
-    let mut real: Supervisor<CHILDREN, HISTORY> =
-        some(Supervisor::new(strategy, intensity(restarts, window)));
+    let mut random = XorShift64::new(seed);
+    let mut real: Real = some(Supervisor::new(strategy, intensity(restarts, window)));
     let mut model = Model {
         strategy,
         restarts,
@@ -150,29 +138,30 @@ fn run(seed: u64, strategy: Strategy, restarts: u32) {
                     [usize::try_from(random.below(3)).unwrap_or(0)];
                 let exit =
                     [Exit::Normal, Exit::Abnormal][usize::try_from(random.below(2)).unwrap_or(0)];
-                let answer = real.stopped(index, policy, exit, now);
-                assert_eq!(answer, model.stopped(index, policy, exit, now));
-                match answer {
-                    Err(Refusal::UnknownChild)
-                    | Ok(Decision::Ignore | Decision::AlreadyEscalated) => {
-                        assert_eq!(real, before, "{answer:?} must change nothing");
+                let expected = model.stopped(index, policy, exit, now);
+                let stop = |r: &mut Real| r.stopped(index, policy, exit, now);
+                match expected {
+                    Err(refusal @ Refusal::UnknownChild) => refuses(&mut real, refusal, stop),
+                    Ok(Decision::Ignore | Decision::AlreadyEscalated) => {
+                        assert_eq!(unchanged(&mut real, stop), expected);
                     }
                     Ok(Decision::Restart(span)) => {
+                        assert_eq!(stop(&mut real), expected);
                         assert!(span.contains(index) && span.last() < CHILDREN);
                         assert_ne!(real, before);
                     }
-                    Ok(Decision::Escalate) => assert!(real.terminated() && !before.terminated()),
+                    Ok(Decision::Escalate) => {
+                        assert_eq!(stop(&mut real), expected);
+                        assert!(real.terminated() && !before.terminated());
+                    }
                 }
             }
             6 | 7 => {
-                let answer = real.record_external_restart(now);
-                let recorded = model.record(now);
-                match answer {
-                    Recording::Recorded => assert!(recorded),
-                    Recording::Outdated => {
-                        assert!(!recorded);
-                        assert_eq!(real, before, "Outdated must change nothing");
-                    }
+                let record = |r: &mut Real| r.record_external_restart(now);
+                if model.record(now) {
+                    assert_eq!(record(&mut real), Recording::Recorded);
+                } else {
+                    assert_eq!(unchanged(&mut real, record), Recording::Outdated);
                 }
             }
             8 => {
@@ -184,16 +173,15 @@ fn run(seed: u64, strategy: Strategy, restarts: u32) {
                     theirs.sort();
                 }
                 let expected = model.absorb(&theirs, now);
-                assert_eq!(real.absorb(&theirs, now), expected);
                 if expected == 0 {
-                    assert_eq!(real, before, "absorbing nothing must change nothing");
+                    assert_eq!(unchanged(&mut real, |r| r.absorb(&theirs, now)), 0);
+                } else {
+                    assert_eq!(real.absorb(&theirs, now), expected);
                 }
-                let after = real;
-                assert_eq!(real.absorb(&theirs, now), 0, "a repeat absorbs nothing");
-                assert_eq!(real, after);
+                // A repeat absorbs nothing, and its own history adds nothing.
+                assert_eq!(unchanged(&mut real, |r| r.absorb(&theirs, now)), 0);
                 let own: Vec<Duration> = real.history().collect();
-                assert_eq!(real.absorb(&own, now), 0, "its own history adds nothing");
-                assert_eq!(real, after);
+                assert_eq!(unchanged(&mut real, |r| r.absorb(&own, now)), 0);
             }
             _ => {
                 let base = Duration::from_nanos(1 + random.below(5));

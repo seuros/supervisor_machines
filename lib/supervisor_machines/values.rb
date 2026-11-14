@@ -44,11 +44,11 @@ module SupervisorMachines
   # other decisions carry nothing and are symbols (:ignore, :escalate,
   # :already_escalated).
   Restart = Data.define(:span) do
+    # The span is checked natively for its exact class and revalidated through
+    # the core (`Marshal.load` skips `initialize`), its fields read from the
+    # struct, never through readers.
     def initialize(span:)
-      raise TypeError, "expected a SupervisorMachines::Span, got #{span.inspect}" unless span.instance_of?(Span)
-
-      # Rebuilt through the core's check: `Marshal.load` skips `initialize`.
-      super(span: Span.new(span.first, span.last))
+      super(span: SupervisorMachines.__send__(:__restart, span))
     end
   end
 
