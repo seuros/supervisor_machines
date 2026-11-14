@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/seuros/supervisor_machines/compare/supervisor_machines/v0.1.4...supervisor_machines/v0.2.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* refuse unknown children, Duration time, multiset restore and absorb, exact-class boundary, Decider core
+
+### Features
+
+* refuse unknown children, Duration time, multiset restore and absorb, exact-class boundary, Decider core ([16f739b](https://github.com/seuros/supervisor_machines/commit/16f739b821052bb676b4086ec63927d9cc0ee8e9))
+
 ## [0.1.4](https://github.com/seuros/supervisor_machines/compare/supervisor_machines/v0.1.3...supervisor_machines/v0.1.4) (2026-11-06)
 
 
