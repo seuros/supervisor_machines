@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/supervisor_machines/compare/supervisor_machines/v0.3.2...supervisor_machines/v0.4.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* take chrono_machines shapes for the respawn delay and seal Decider
+
+### Features
+
+* take chrono_machines shapes for the respawn delay and seal Decider ([b837f98](https://github.com/seuros/supervisor_machines/commit/b837f981e1e8eba163a54bafed04b94a18b7cd0f))
+
+
+### Bug Fixes
+
+* fix wrapped classes at load so building a value runs no Ruby ([3b425ae](https://github.com/seuros/supervisor_machines/commit/3b425ae69f73c6cf8df692c7c094918cd661de4f))
+
 ## [0.3.2](https://github.com/seuros/supervisor_machines/compare/supervisor_machines/v0.3.1...supervisor_machines/v0.3.2) (2026-11-14)
 
 
