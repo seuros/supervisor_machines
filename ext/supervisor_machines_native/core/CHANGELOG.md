@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/seuros/supervisor_machines/compare/supervisor-machines-v0.6.0...supervisor-machines-v0.7.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* take chrono_machines shapes for the respawn delay and seal Decider
+
+### Features
+
+* take chrono_machines shapes for the respawn delay and seal Decider ([b837f98](https://github.com/seuros/supervisor_machines/commit/b837f981e1e8eba163a54bafed04b94a18b7cd0f))
+
 ## [0.6.0](https://github.com/seuros/supervisor_machines/compare/supervisor-machines-v0.5.0...supervisor-machines-v0.6.0) (2026-11-14)
 
 
