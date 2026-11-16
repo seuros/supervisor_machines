@@ -21,7 +21,9 @@ use std::time::Duration;
 
 use magnus::typed_data::Obj;
 use magnus::{Error, Integer, RArray, RModule, Ruby, Value, function, method, prelude::*};
-use matryona_machines::ruby::{Symbols, duration, exact_array, integer, keep, nanoseconds};
+use matryona_machines::ruby::{
+    Symbols, class_name, duration, exact_array_with, integer, keep, nanoseconds,
+};
 use supervisor_machines::{
     Decision, Exit, Intensity, Policy, Recording, Refusal, Span, Strategy, Supervisor,
 };
@@ -214,11 +216,39 @@ fn shape(
 /// Integer nanosecond instants, all converted before the core sees any. Only
 /// an `Array` is read, never a subclass that could answer for its elements.
 fn instants(ruby: &Ruby, value: Value) -> Result<Vec<Duration>, Error> {
-    let array = exact_array(ruby, value, "history must be an Array of Integers")?;
+    let array = exact_array_with(ruby, value, || {
+        format!(
+            "history must be an Array of Integers, not {}",
+            class_name(value)
+        )
+    })?;
     array
         .into_iter()
         .map(|item| duration(item, "history"))
         .collect()
+}
+
+/// The `RangeError` for an intensity the history cannot enforce.
+fn cannot_escalate(ruby: &Ruby, intensity: Intensity) -> Error {
+    Error::new(
+        ruby.exception_range_error(),
+        format!(
+            "{} restarts cannot escalate, the most is {MAX_RESTARTS}",
+            intensity.restarts()
+        ),
+    )
+}
+
+/// What `Supervisor.new` runs under: a `SupervisorMachines::Intensity` read
+/// natively (exact class, fields from the struct), rebuilt through the core,
+/// and refused past [`MAX_RESTARTS`] with the errors `Decider.new` gives, so
+/// a tree that cannot escalate fails before it takes on a child.
+pub fn supervised_intensity_hook(ruby: &Ruby, value: Value) -> Result<Value, Error> {
+    let intensity = intensity_from(ruby, value)?;
+    if intensity.restarts() > MAX_RESTARTS {
+        return Err(cannot_escalate(ruby, intensity));
+    }
+    intensity_value(ruby, intensity)
 }
 
 #[magnus::wrap(class = "SupervisorMachines::Decider", free_immediately, size)]
@@ -246,15 +276,8 @@ impl Wrapper {
                 ),
             ));
         }
-        let tree = shape(children, strategy, intensity, saved).ok_or_else(|| {
-            Error::new(
-                ruby.exception_range_error(),
-                format!(
-                    "{} restarts cannot escalate, the most is {MAX_RESTARTS}",
-                    intensity.restarts()
-                ),
-            )
-        })?;
+        let tree = shape(children, strategy, intensity, saved)
+            .ok_or_else(|| cannot_escalate(ruby, intensity))?;
         Ok(Self(RefCell::new(Tree(tree))))
     }
 

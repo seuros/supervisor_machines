@@ -1,5 +1,6 @@
 [workspace]
 members = ["ext/supervisor_machines_native/core", "ext/supervisor_machines_native/ffi"]
+default-members = ["ext/supervisor_machines_native/core"]
 resolver = "3"
 
 [workspace.package]
@@ -8,7 +9,7 @@ rust-version = "1.99"
 
 [workspace.dependencies]
 supervisor-machines = { path = "ext/supervisor_machines_native/core" }
-matryona-machines = { version = ">=0.4", default-features = false }
+matryona-machines = { version = ">=0.5", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

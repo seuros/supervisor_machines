@@ -147,14 +147,15 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
     /// persist so another process can [`restore`](Self::restore) or
     /// [`absorb`](Self::absorb) it.
     pub fn history(&self) -> impl Iterator<Item = Duration> + '_ {
-        self.history[..self.recorded].iter().copied()
+        self.held().iter().copied()
     }
 
     /// Restarts still inside the window as of `now`. A pure query.
     #[must_use]
     pub fn recent_restarts(&self, now: Duration) -> u32 {
         let cutoff = now.saturating_sub(self.intensity.window());
-        let recent = self.history[..self.recorded]
+        let recent = self
+            .held()
             .iter()
             .rev()
             .take_while(|&&at| at >= cutoff)
@@ -196,13 +197,14 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
         let cutoff = now.saturating_sub(self.intensity.window());
         // The counts to compare against are this supervisor's before the
         // merge: inserting shifts (and, when full, drops) what it holds.
-        let snapshot = self.history;
-        let before = &snapshot[..self.recorded];
+        let snapshot = *self;
+        let before = snapshot.held();
         let sorted = history.is_sorted();
         let mut previous = None;
         let mut run = 0;
         for (index, &at) in history.iter().enumerate() {
             if sorted {
+                // `run` counts earlier entries of `history`: below its length.
                 run = if previous == Some(at) { run + 1 } else { 0 };
                 previous = Some(at);
             }
@@ -214,8 +216,9 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
             let rank = if sorted {
                 run
             } else {
-                history[..index]
+                history
                     .iter()
+                    .take(index)
                     .filter(|&&earlier| earlier == at)
                     .count()
             };
@@ -225,7 +228,7 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
                 self.record(at);
             }
         }
-        added(before, &self.history[..self.recorded])
+        added(before, self.held())
     }
 
     /// How long to hold off the restart just granted: `base` doubled once per
@@ -270,6 +273,7 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
         let mut doublings = self.recent_restarts(now).saturating_sub(1);
         while doublings > 0 && delay < ceiling {
             delay = delay.saturating_mul(2);
+            // Guarded by `doublings > 0`.
             doublings -= 1;
         }
         delay.min(ceiling)
@@ -282,6 +286,7 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
         if index >= CHILDREN {
             return None;
         }
+        // `index < CHILDREN`, so `CHILDREN` is at least one.
         let last = CHILDREN - 1;
         match self.strategy {
             Strategy::OneForOne => Span::new(index, index),
@@ -293,20 +298,43 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
     /// Insert `at` in order. A full history lets its oldest instant go; an
     /// instant older than everything a full history holds is not kept, and
     /// the answer is `false` with nothing changed.
+    ///
+    /// Both shifts carry `at` through the entries it displaces, so no index
+    /// is ever taken: `slot <= recorded`, as a partition point of what is
+    /// held.
     fn record(&mut self, at: Duration) -> bool {
-        let slot = self.history[..self.recorded].partition_point(|&held| held <= at);
+        let slot = self.held().partition_point(|&held| held <= at);
+        let mut carry = at;
         if self.recorded < HISTORY {
-            self.history.copy_within(slot..self.recorded, slot + 1);
-            self.history[slot] = at;
+            // `at` lands at `slot`; every entry from there up to `recorded`
+            // moves one right, into the first free entry. `recorded + 1`
+            // cannot overflow below `HISTORY`.
+            for held in self.history.iter_mut().take(self.recorded + 1).skip(slot) {
+                core::mem::swap(held, &mut carry);
+            }
             self.recorded += 1;
             return true;
         }
         if slot == 0 {
             return false;
         }
-        self.history.copy_within(1..slot, 0);
-        self.history[slot - 1] = at;
+        // Full: `at` lands at `slot - 1`, every entry below moves one left
+        // and the oldest falls off the front with the carry.
+        for held in self.history.iter_mut().take(slot).rev() {
+            core::mem::swap(held, &mut carry);
+        }
         true
+    }
+
+    /// The instants held, oldest first.
+    fn held(&self) -> &[Duration] {
+        let Some(held) = self.history.get(..self.recorded) else {
+            // Only `record` raises `recorded`, and only below `HISTORY`.
+            debug_assert!(false, "recorded never passes HISTORY");
+            // Past `HISTORY`, the whole history is what is held.
+            return &self.history;
+        };
+        held
     }
 
     /// Decide what to do about the child at `index`.
@@ -359,8 +387,10 @@ impl<const CHILDREN: usize, const HISTORY: usize> Supervisor<CHILDREN, HISTORY> 
 
 /// How many times `at` appears in the sorted `held`.
 fn occurrences(held: &[Duration], at: Duration) -> usize {
+    // `held` is sorted, so the instants below `at` end no later than the
+    // instants up to `at`: the difference never saturates.
     let after = held.partition_point(|&instant| instant <= at);
-    after - held[..after].partition_point(|&instant| instant < at)
+    after.saturating_sub(held.partition_point(|&instant| instant < at))
 }
 
 /// How many entries of the sorted `after` are not matched by one in the
@@ -372,6 +402,7 @@ fn added(before: &[Duration], after: &[Duration]) -> usize {
     for at in after {
         while held.next_if(|&instant| instant < at).is_some() {}
         if held.next_if_eq(&at).is_none() {
+            // At most `after.len()`.
             added += 1;
         }
     }

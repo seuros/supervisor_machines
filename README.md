@@ -112,7 +112,8 @@ the problem. That decision is sticky: `terminated?` stays true and every later
 ## 🚫 Rules of Engagement
 
 - The delay between a restart decision and the respawn comes from
-  [chrono_machines][chrono]. Pass your own `backoff:` to change the curve.
+  [chrono_machines][chrono]: `Supervisor::BACKOFF`, 100 ms doubling to 10 s
+  with full jitter. Pass another shape as `backoff:` to change the curve.
 - The shutdown budget comes from [deadline_machines][deadline]: `stop(grace)`
   bounds the whole ordered teardown, and a child that outstays it is left
   behind rather than waited on forever.
@@ -134,7 +135,7 @@ Threads are the only supervised unit.
 
 `Supervisor` is a runtime on top of the core, not a mirror of it, so it keeps
 two keyword defaults the core has no counterpart for: `backoff:` (a
-chrono_machines executor one attempt wider than the intensity) and
+chrono_machines shape, asked `delay(restarts, draw)` in nanoseconds) and
 `supervise(name, policy: :permanent)`, OTP's default child policy. The
 `Decider` below is the mirror, and takes no keyword at all.
 
@@ -162,7 +163,9 @@ Sealing stops accidents, not reflection (a named subclass's constant is bound
 before `inherited` raises, and `Marshal.load` skips `initialize`), so the
 binding is the authority: every value it reads must be an instance of exactly
 the gem's class (`TypeError` otherwise, a subclass included) and is rebuilt
-through the core constructor (`RangeError` for a forged one).
+through the core constructor (`RangeError` for a forged one). `Decider` wraps
+native state with no allocator, and is sealed too: subclassing it raises
+`TypeError`.
 
 ### Contract
 

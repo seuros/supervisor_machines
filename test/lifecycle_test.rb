@@ -31,6 +31,31 @@ module SupervisorMachines
       assert_operator monotonic - started, :<, Nursery::PATIENCE
     end
 
+    # The backoff is asked for Integer nanoseconds with the restart count and
+    # a draw over 0...2**64, and a zero delay respawns at once.
+    def test_a_respawn_asks_the_backoff_for_nanoseconds
+      asked = Thread::Queue.new
+      backoff = Object.new
+      backoff.define_singleton_method(:delay) { |attempt, draw| asked << [attempt, draw] && 0 }
+      supervisor = Supervisor.new(:one_for_one, Intensity.default, backoff: backoff)
+      supervisor.supervise(:a, &@nursery.starter(:a))
+      supervisor.start
+      assert_equal :a, @nursery.next_start
+
+      @nursery.finish(:a, :abnormal)
+
+      assert_equal :a, @nursery.next_start
+      attempt, draw = asked.pop
+      assert_equal 1, attempt
+      assert_includes 0...(2**64), draw
+      supervisor.stop(Nursery::PATIENCE_NS)
+    end
+
+    def test_the_default_backoff_is_a_chrono_shape
+      assert_instance_of ChronoMachines::Exponential, Supervisor::BACKOFF
+      assert_raises(TypeError) { Supervisor.new(:one_for_one, Intensity.default, backoff: 5) }
+    end
+
     def test_escalating_takes_the_tree_down_and_stays_escalated
       supervisor = tree(%i[a b c], restarts: 1)
 

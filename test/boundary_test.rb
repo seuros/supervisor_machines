@@ -84,6 +84,67 @@ module SupervisorMachines
       assert_raises(TypeError) { Restart.new(forger.new(first: 1, last: 2)) }
     end
 
+    # `Supervisor.new` reads its intensity natively, as `Decider.new` does:
+    # neither `instance_of?` nor a reader is asked, so neither can lie.
+    def test_the_supervisor_reads_its_intensity_natively
+      intensity = Intensity.new(2, 60)
+      Intensity.alias_method(:__real_instance_of?, :instance_of?)
+      Intensity.define_method(:instance_of?) { |_| false }
+      redefined(Intensity => %i[restarts window]) do
+        assert_equal [2, 60], Supervisor.new(:one_for_one, intensity).intensity.to_h.values_at(:restarts, :window)
+      end
+      forger = forge(Intensity, 'Intensity')
+      forger.define_method(:instance_of?) { |_| true }
+      forger.define_method(:class) { Intensity }
+
+      assert_raises(TypeError) { Supervisor.new(:one_for_one, forger.new(restarts: 1, window: 60)) }
+    ensure
+      Intensity.alias_method(:instance_of?, :__real_instance_of?)
+      Intensity.remove_method(:__real_instance_of?)
+    end
+
+    # A value is frozen, so a singleton class can be opened but not given
+    # methods. The tree keeps a fresh value rebuilt from the struct's own
+    # fields, never the one it was handed.
+    def test_the_supervisor_keeps_a_fresh_value_for_an_opened_singleton
+      intensity = Intensity.new(2, 60).tap(&:singleton_class)
+
+      assert_raises(FrozenError) { intensity.define_singleton_method(:restarts) { 0 } }
+      kept = Supervisor.new(:one_for_one, intensity).intensity
+
+      assert_equal Intensity.new(2, 60), kept
+      refute_same intensity, kept
+      assert_empty kept.singleton_methods
+    end
+
+    # A Marshal-edited value past MAX_RESTARTS is refused from the field the
+    # binding read, with the same text `Decider.new` gives.
+    def test_a_marshal_edited_restart_count_is_refused_as_the_decider_refuses_it
+      dumped = Marshal.dump(Intensity.new(2, 60))
+      intensity = Marshal.load(dumped.sub("i\x07".b, "i#{(Decider::MAX_RESTARTS + 6).chr}".b))
+
+      assert_equal Decider::MAX_RESTARTS + 1, intensity.restarts
+      expected = assert_raises(RangeError) { Decider.new(1, :one_for_one, intensity) }
+      error = assert_raises(RangeError) { Supervisor.new(:one_for_one, intensity) }
+      assert_equal expected.message, error.message
+    end
+
+    def test_the_supervisor_names_a_wrong_type_as_the_decider_does
+      [[1, MINUTE], Span.new(1, 2), nil, [1, MINUTE].tap(&:singleton_class)].each do |wrong|
+        expected = assert_raises(TypeError) { Decider.new(1, :one_for_one, wrong) }
+        error = assert_raises(TypeError) { Supervisor.new(:one_for_one, wrong) }
+        assert_equal expected.message, error.message
+      end
+      error = assert_raises(TypeError) { Supervisor.new(:one_for_one, [1, MINUTE]) }
+      assert_equal 'expected a SupervisorMachines::Intensity, not Array', error.message
+    end
+
+    def test_the_validating_hooks_are_private
+      %i[__intensity __span __restart __policy __strategy __supervised_intensity].each do |hook|
+        assert_raises(NoMethodError) { SupervisorMachines.public_send(hook, nil) }
+      end
+    end
+
     def test_classes_held_by_the_binding_survive_gc_compaction
       decider = Decider.new(1, :one_for_one, Intensity.new(3, 60_000_000_000))
       # Compacting moves every unpinned object: a class the binding holds

@@ -103,7 +103,7 @@ module SupervisorMachines
 
     # A tree restarts as fast as it can decide to, so the tests measure the
     # supervisor rather than chrono_machines' backoff curve.
-    IMMEDIATE = ChronoMachines::Executor.new(base_delay: 0, max_attempts: Decider::HISTORY)
+    IMMEDIATE = ChronoMachines::Constant.new(0, 0.0)
 
     def setup
       Thread.report_on_exception = false

@@ -14,9 +14,8 @@ module SupervisorMachines
   # are final: {#start} refuses a tree that is not registering, and a +failed+
   # tree answers every {#stop} with {Escalated}.
   #
-  # Every instant and span it takes or reports is Integer nanoseconds. The
-  # sibling gems it drives still take Float seconds, so the conversion happens
-  # here, at their door.
+  # Every instant and span it takes or reports is Integer nanoseconds, as
+  # deadline_machines takes them; only Thread#join gets Float seconds.
   #
   #   minute = 60 * 1_000_000_000
   #   tree = SupervisorMachines::Supervisor.new(:one_for_all, SupervisorMachines::Intensity.new(3, minute))
@@ -41,10 +40,17 @@ module SupervisorMachines
     Child.define_singleton_method(:inherited) { |_| raise TypeError, "#{Child} cannot be subclassed" }
     private_constant :Child
 
-    # Converts the nanoseconds this class takes into the seconds its sibling
-    # gems take.
+    # Converts a budget in nanoseconds into the seconds Thread#join takes.
     NS_PER_SECOND = 1_000_000_000
     private_constant :NS_PER_SECOND
+
+    # The respawn delay when none is given: 100 ms doubling to 10 s, full
+    # jitter.
+    BACKOFF = ChronoMachines::Exponential.new(NS_PER_SECOND / 10, 2.0, 10 * NS_PER_SECOND, 1.0)
+
+    # Jitter draws are uniform over 0...DRAWS.
+    DRAWS = 1 << 64
+    private_constant :DRAWS
 
     # Wakes the monitor when the tree is being taken down.
     STOP = Object.new
@@ -56,27 +62,26 @@ module SupervisorMachines
     # core's +Supervisor::new+ takes them; past the intensity the tree
     # escalates. TypeError for the wrong types, RangeError for an unknown
     # strategy or more restarts than {Decider::MAX_RESTARTS}. +backoff+ is
-    # asked for the delay between a restart decision and the respawn; its
-    # attempt budget has to be one wider than the intensity, because the core
-    # escalates one restart after the last one it tolerates.
+    # asked for the delay between a restart decision and the respawn:
+    # anything answering +delay(attempt, draw)+ with Integer nanoseconds, a
+    # +chrono_machines+ shape ({BACKOFF} unless told otherwise). It has no
+    # attempt budget of its own: the core decides when the tree escalates.
     #
     # +backoff:+ and {#supervise}'s +policy: :permanent+ are keyword defaults
     # the core has no counterpart for. They stay because this class is a
     # runtime on top of the core, not a mirror of it; {Decider} is the mirror.
     def initialize(strategy, intensity, backoff: nil)
       strategy = SupervisorMachines.__send__(:__strategy, strategy)
-      unless intensity.instance_of?(Intensity)
-        raise TypeError, "expected a SupervisorMachines::Intensity, got #{intensity.inspect}"
-      end
-      # Rebuilt through the core's check: `Marshal.load` skips `initialize`.
-      intensity = Intensity.new(intensity.restarts, intensity.window)
-      if intensity.restarts > Decider::MAX_RESTARTS
-        raise RangeError, "#{intensity.restarts} restarts cannot escalate, the most is #{Decider::MAX_RESTARTS}"
-      end
+      # Read natively, never through `instance_of?` or the readers, and
+      # rebuilt through the core: `Marshal.load` skips `initialize`.
+      intensity = SupervisorMachines.__send__(:__supervised_intensity, intensity)
 
       @strategy = strategy
       @intensity = intensity
-      @backoff = backoff || ChronoMachines::Executor.new(max_attempts: intensity.restarts + 1)
+      backoff ||= BACKOFF
+      raise TypeError, "backoff must answer delay, got #{backoff.inspect}" unless backoff.respond_to?(:delay)
+
+      @backoff = backoff
       @slots = []
       @events = Thread::Queue.new
       @mutex = Thread::Mutex.new
@@ -145,7 +150,7 @@ module SupervisorMachines
     #
     # Raises {Escalated} for a tree that gave up, every time it is called.
     def stop(grace = nil)
-      budget = grace.nil? ? nil : seconds(grace)
+      budget = grace.nil? ? nil : grace_ns(grace)
       entered = @mutex.synchronize do
         state = @state
         @state = :stopped if state == :running
@@ -158,7 +163,7 @@ module SupervisorMachines
       failures = nil
       DeadlineMachines.with_deadline(budget) do |deadline|
         failures = shutdown
-        @monitor.kill unless @monitor.join(deadline.remaining)
+        @monitor.kill unless @monitor.join(join_seconds(deadline.remaining))
       end
       raise Escalated, escalation if terminated?
       raise failures.first unless failures.empty?
@@ -189,7 +194,7 @@ module SupervisorMachines
     # Takes down whatever a start brought up before it failed, the children and
     # the monitor watching them, inside one budget.
     def rollback
-      DeadlineMachines.with_deadline(seconds(ESCALATION_GRACE)) do |deadline|
+      DeadlineMachines.with_deadline(ESCALATION_GRACE) do |deadline|
         shutdown
         reap(@monitor, deadline.remaining)
       end
@@ -235,7 +240,7 @@ module SupervisorMachines
     # in index order.
     def restart(span)
       retiring = @mutex.synchronize { span.last.downto(span.first).filter_map { |index| retire(index) } }
-      DeadlineMachines.with_deadline(seconds(ESCALATION_GRACE)) do |deadline|
+      DeadlineMachines.with_deadline(ESCALATION_GRACE) do |deadline|
         retiring.each { |thread| reap(thread, deadline.remaining) }
       end
       return escalate(abandoned) if retiring.any?(&:alive?)
@@ -246,8 +251,8 @@ module SupervisorMachines
 
     # The reason a respawn could not happen, or nil once the span is running.
     def respawn(span)
-      delay = @backoff.next_delay(attempt: restarts)
-      @mutex.synchronize { @halt.wait(@mutex, delay) if delay && running? }
+      delay = @backoff.delay(restarts.clamp(1, 255), Random.rand(DRAWS))
+      @mutex.synchronize { @halt.wait(@mutex, delay.fdiv(NS_PER_SECOND)) if delay.positive? && running? }
       span.first.upto(span.last) { |index| spawn(index) }
       nil
     rescue Exception => e
@@ -259,12 +264,12 @@ module SupervisorMachines
         @state = :failed
         @failed = reason
       end
-      shutdown(seconds(ESCALATION_GRACE))
+      shutdown(ESCALATION_GRACE)
       raise Escalated, reason
     end
 
     # Reverse start order, each child killed and then waited for inside one
-    # budget of +grace+ seconds shared by the whole tree. Touches no tree state, so a shutdown
+    # budget of +grace+ nanoseconds (nil: no limit) shared by the whole tree. Touches no tree state, so a shutdown
     # under way in the monitor never holds up the one in {#stop}. Returns what
     # the children raised on their way out, having stopped all of them.
     def shutdown(grace = DeadlineMachines.remaining)
@@ -280,12 +285,12 @@ module SupervisorMachines
       failures.compact
     end
 
-    # Kills the thread and waits out the rest of the budget for it, reporting
-    # whatever it raised on the way out. A thread that outlives the budget is
-    # still alive afterwards.
+    # Kills the thread and waits out the rest of the budget, +remaining+
+    # nanoseconds or nil for no limit, for it, reporting whatever it raised on
+    # the way out. A thread that outlives the budget is still alive afterwards.
     def reap(thread, remaining)
       thread.kill
-      thread.join(remaining)
+      thread.join(join_seconds(remaining))
       nil
     rescue Exception => e
       e
@@ -314,7 +319,7 @@ module SupervisorMachines
         watch(index, generation, thread)
         true
       end
-      reap(thread, seconds(ESCALATION_GRACE)) unless installed
+      reap(thread, ESCALATION_GRACE) unless installed
     end
 
     # Invalidates the watcher following the child at +index+ and hands its
@@ -352,12 +357,17 @@ module SupervisorMachines
       DeadlineMachines.clock.now_ns
     end
 
-    # Integer nanoseconds as the Float seconds deadline_machines takes.
-    def seconds(nanos)
+    # A grace checked before anything is touched: Integer nanoseconds.
+    def grace_ns(nanos)
       raise TypeError, "a grace is Integer nanoseconds, got #{nanos.inspect}" unless nanos.is_a?(Integer)
       raise RangeError, "a grace cannot be negative: #{nanos}" if nanos.negative?
 
-      nanos.fdiv(NS_PER_SECOND)
+      nanos
+    end
+
+    # A budget in nanoseconds, or nil for none, as Thread#join's timeout.
+    def join_seconds(nanos)
+      nanos&.fdiv(NS_PER_SECOND)
     end
   end
 end

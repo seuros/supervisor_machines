@@ -50,6 +50,15 @@ module SupervisorMachines
       end
     end
 
+    # The native wrappers have no allocator, and a subclass's `new` would
+    # build the base class anyway: subclassing them raises too.
+    def test_native_wrappers_are_sealed
+      [Decider].each do |wrapper|
+        assert_raises(TypeError) { Class.new(wrapper) }
+        assert_raises(TypeError) { wrapper.allocate }
+      end
+    end
+
     def test_the_closed_sets_are_the_cores
       assert_equal %i[one_for_one one_for_all rest_for_one], STRATEGIES
       assert_equal %i[permanent transient temporary], POLICIES

@@ -136,6 +136,20 @@ module SupervisorMachines
       assert_empty tree.history
     end
 
+    # A refusal names the class that arrived, the real one even with an
+    # opened singleton class.
+    def test_a_refusal_names_the_received_class
+      tree = decider
+      history = { at: SECOND }.tap(&:singleton_class)
+
+      error = assert_raises(TypeError) { tree.absorb(history, 3 * SECOND) }
+      assert_equal 'history must be an Array of Integers, not Hash', error.message
+      error = assert_raises(TypeError) { Decider.new(1, :one_for_one, [1, MINUTE].tap(&:singleton_class)) }
+      assert_equal 'expected a SupervisorMachines::Intensity, not Array', error.message
+      error = assert_raises(TypeError) { Restart.new(Intensity.default) }
+      assert_equal 'expected a SupervisorMachines::Span, not SupervisorMachines::Intensity', error.message
+    end
+
     def test_restoring_a_history_rebuilds_the_window
       first = decider
       first.stopped(0, :permanent, :abnormal, 10 * SECOND)

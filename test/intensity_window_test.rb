@@ -6,7 +6,7 @@ module SupervisorMachines
   class IntensityWindowTest < Test
     def setup
       super
-      @clock = DeadlineMachines::TestClock.new(now_ns: 1_000_000_000)
+      @clock = DeadlineMachines::TestClock.new(1_000_000_000)
       DeadlineMachines.clock = @clock
     end
 
@@ -24,7 +24,7 @@ module SupervisorMachines
       assert_equal :a, @nursery.next_start
       assert_equal 1, supervisor.restarts
 
-      @clock.advance(120.0)
+      @clock.advance(120 * 1_000_000_000)
 
       assert_equal 0, supervisor.restarts
       refute_predicate supervisor, :terminated?

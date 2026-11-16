@@ -43,6 +43,19 @@ module SupervisorMachines
   # Every exit, in the order the core declares them.
   EXITS: Array[exit_kind]
 
+  # Private native checks behind the values and Supervisor, TypeError for a
+  # wrong type, RangeError for what the core rejects. `__intensity` and
+  # `__span` answer the fields as the core holds them; `__restart`,
+  # `__policy` and `__strategy` answer their argument; `__supervised_intensity`
+  # reads exactly an Intensity and rebuilds it, RangeError past
+  # Decider::MAX_RESTARTS.
+  private def self.__intensity: (Integer restarts, Integer window) -> [Integer, Integer]
+  private def self.__span: (Integer first, Integer last) -> [Integer, Integer]
+  private def self.__restart: (Span span) -> Span
+  private def self.__policy: (policy policy) -> policy
+  private def self.__strategy: (strategy strategy) -> strategy
+  private def self.__supervised_intensity: (Intensity intensity) -> Intensity
+
   # The core's `Intensity`: `restarts` within `window` nanoseconds. A zero
   # window, a negative value or one past its width raises `RangeError`; a
   # non-Integer `TypeError`.
@@ -180,10 +193,14 @@ module SupervisorMachines
     ESCALATION_GRACE: Integer
 
     # Anything that can price the wait between a restart decision and the
-    # respawn, which is `ChronoMachines::Executor` unless told otherwise.
+    # respawn, in Integer nanoseconds from an attempt (1..255) and a draw
+    # (0...2**64): a `chrono_machines` shape, BACKOFF unless told otherwise.
     interface _Backoff
-      def next_delay: (attempt: Integer) -> Numeric?
+      def delay: (Integer attempt, Integer draw) -> Integer
     end
+
+    # A ChronoMachines::Exponential: 100 ms doubling to 10 s, full jitter.
+    BACKOFF: _Backoff
 
     # A registered child and whichever thread currently runs it. Private;
     # replaced under the tree's lock, never mutated.
@@ -253,8 +270,8 @@ module SupervisorMachines
     def restart: (Span span) -> void
     def respawn: (Span span) -> String?
     def escalate: (?String reason) -> void
-    def shutdown: (?Float grace) -> Array[Exception]
-    def reap: (Thread thread, Float? remaining) -> Exception?
+    def shutdown: (?Integer? grace) -> Array[Exception]
+    def reap: (Thread thread, Integer? remaining) -> Exception?
     def spawn: (Integer index) -> void
 
     # Installs a started thread under the generation that asked for it, killing
@@ -266,6 +283,7 @@ module SupervisorMachines
     def abandoned: () -> String
     def unstarted: (Exception error) -> String
     def monotonic_ns: () -> Integer
-    def seconds: (Integer nanos) -> Float
+    def grace_ns: (Integer nanos) -> Integer
+    def join_seconds: (Integer? nanos) -> Float?
   end
 end

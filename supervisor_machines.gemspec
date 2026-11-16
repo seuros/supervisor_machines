@@ -38,8 +38,8 @@ Gem::Specification.new do |spec|
   spec.require_paths = ['lib']
   spec.extensions = ['ext/supervisor_machines_native/extconf.rb']
 
-  spec.add_dependency 'chrono_machines', '>= 0.12.1'
-  spec.add_dependency 'deadline_machines', '>= 0.1'
+  spec.add_dependency 'chrono_machines', '>= 0.13.0'
+  spec.add_dependency 'deadline_machines', '>= 0.2.0'
   # A source install runs extconf.rb, which requires rb_sys/mkmf, and RubyGems
   # clears GEM_PATH while building the extension. Without this the build only
   # works where rb_sys happens to be installed globally.

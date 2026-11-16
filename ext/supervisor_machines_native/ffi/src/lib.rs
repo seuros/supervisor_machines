@@ -13,7 +13,7 @@ mod init;
 
 use magnus::{Error, IntoValue, RArray, RClass, RModule, Ruby, Value, prelude::*};
 use matryona_machines::ruby::{
-    Class, Registry, Symbols, duration, exact_fields, integer, nanoseconds, symbol,
+    Class, SymbolNames, Symbols, class_name, duration, exact_fields_with, integer, nanoseconds,
 };
 use supervisor_machines::{Decision, Exit, Intensity, Policy, Recording, Refusal, Span, Strategy};
 
@@ -51,6 +51,17 @@ matryona_machines::symbols! {
 }
 
 matryona_machines::symbols! {
+    /// Every [`Decision`]; `Restart` leaves as a `Restart`, the rest as
+    /// these Symbols.
+    pub(crate) Decisions for Decision as "a decision" => names_only {
+        Ignore => "ignore",
+        Restart(..) => "restart",
+        Escalate => "escalate",
+        AlreadyEscalated => "already_escalated",
+    }
+}
+
+matryona_machines::symbols! {
     /// What `record_external_restart` answers.
     pub(crate) Recordings for Recording as "a recording" {
         Recorded => "recorded",
@@ -72,10 +83,9 @@ struct Classes {
     restart: Class,
 }
 
-static CLASSES: Registry<Classes> = Registry::new("supervisor_machines");
-
-fn classes(ruby: &Ruby) -> Result<&'static Classes, Error> {
-    CLASSES.get(ruby)
+matryona_machines::registry! {
+    static CLASSES: Classes = "supervisor_machines";
+    fn classes;
 }
 
 pub(crate) fn resolve_classes(ruby: &Ruby, module: RModule) -> Result<(), Error> {
@@ -116,15 +126,24 @@ fn checked_span(ruby: &Ruby, first: Value, last: Value) -> Result<Span, Error> {
 /// A `SupervisorMachines::Intensity`, revalidated through the core.
 pub(crate) fn intensity_from(ruby: &Ruby, value: Value) -> Result<Intensity, Error> {
     let class = classes(ruby)?.intensity.get(ruby);
-    let message = "expected a SupervisorMachines::Intensity";
-    let [restarts, window] = exact_fields(ruby, value, class, message)?;
+    let [restarts, window] = exact_fields_with(ruby, value, class, || {
+        format!(
+            "expected a SupervisorMachines::Intensity, not {}",
+            class_name(value)
+        )
+    })?;
     checked_intensity(ruby, restarts, window)
 }
 
 /// A `SupervisorMachines::Span`, revalidated through the core.
 fn span_from(ruby: &Ruby, value: Value) -> Result<Span, Error> {
     let class = classes(ruby)?.span.get(ruby);
-    let [first, last] = exact_fields(ruby, value, class, "expected a SupervisorMachines::Span")?;
+    let [first, last] = exact_fields_with(ruby, value, class, || {
+        format!(
+            "expected a SupervisorMachines::Span, not {}",
+            class_name(value)
+        )
+    })?;
     checked_span(ruby, first, last)
 }
 
@@ -158,10 +177,10 @@ impl DecisionClasses {
     /// `:ignore`, a `Restart`, `:escalate` or `:already_escalated`.
     pub(crate) fn decision(self, ruby: &Ruby, decision: Decision) -> Result<Value, Error> {
         match decision {
-            Decision::Ignore => Ok(symbol(ruby, "ignore").as_value()),
             Decision::Restart(span) => self.restart.funcall("new", (self.span(span)?,)),
-            Decision::Escalate => Ok(symbol(ruby, "escalate").as_value()),
-            Decision::AlreadyEscalated => Ok(symbol(ruby, "already_escalated").as_value()),
+            unit @ (Decision::Ignore | Decision::Escalate | Decision::AlreadyEscalated) => {
+                Ok(Decisions::symbol_of(ruby, unit).as_value())
+            }
         }
     }
 }
@@ -204,9 +223,4 @@ pub(crate) fn frozen<T: IntoValue>(
     }
     array.freeze();
     Ok(array)
-}
-
-/// A frozen array of the symbols naming a closed set, in table order.
-pub(crate) fn names<T: Symbols>(ruby: &Ruby) -> Result<RArray, Error> {
-    frozen(ruby, T::ALL.iter().map(|&each| T::symbol(ruby, each)))
 }

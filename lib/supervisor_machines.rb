@@ -12,7 +12,11 @@ require_relative 'supervisor_machines/values'
 require 'supervisor_machines_native/supervisor_machines_native'
 
 module SupervisorMachines
-  private_class_method :__intensity, :__span, :__policy, :__strategy
+  private_class_method :__intensity, :__span, :__restart, :__policy, :__strategy, :__supervised_intensity
+
+  # Decider wraps native state and has no allocator: a subclass's `new`
+  # would build the base class anyway, so subclassing raises too.
+  Decider.define_singleton_method(:inherited) { |_| raise TypeError, "#{Decider} cannot be subclassed" }
 end
 
 require_relative 'supervisor_machines/errors'

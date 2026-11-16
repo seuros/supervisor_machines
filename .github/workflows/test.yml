@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [ master ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: Dictator
@@ -15,7 +22,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: seuros/setup-dictator@master
         with:
-          version: '0.26.0'
+          version: '0.28.1'
       - run: dictator lint --format github .
 
   crates:
@@ -25,49 +32,34 @@ jobs:
       - uses: jdx/mise-action@v5
         with:
           # rb-sys gates part of the magnus API on the Ruby it builds against,
-          # so the binding crate needs a Ruby here even though the core does
-          # not. Without one, Ruby::define_data is compiled out and the lint
-          # fails on a method that exists everywhere it is actually used.
+          # so the binding crate needs a Ruby here even though the core does not.
           mise_toml: |
             [tools]
             ruby = "4.0"
             rust = { version = "1.99", components = "clippy,rustfmt" }
 
-      - name: Locate the crates
-        id: crates
+      - name: Reject path-sourced sibling crates in Cargo.lock
         run: |
-          core=''
-          ffi=''
-          for dir in ext/*/core; do [ -d "$dir" ] && core="$dir"; done
-          for dir in ext/*/ffi; do [ -d "$dir" ] && ffi="$dir"; done
-          echo "core=$core" >> "$GITHUB_OUTPUT"
-          echo "ffi=$ffi" >> "$GITHUB_OUTPUT"
+          ruby -rjson -e '
+            own = JSON.parse(`cargo metadata --no-deps --format-version 1`).fetch("packages").map { |pkg| pkg["name"] }
+            stray = File.read("Cargo.lock").split("[[package]]").filter_map do |pkg|
+              name = pkg[/^name = "([^"]+)"/, 1]
+              next unless name && name.end_with?("-machines") && !own.include?(name)
+              name unless pkg.match?(/^source = "registry/)
+            end
+            abort "Cargo.lock pins sibling crates without a registry source: #{stray.join(", ")}" unless stray.empty?
+          '
+      - name: Lint the workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # The core is plainly no_std and has no features, so there is one
-      # combination to lint and test.
-      - name: Lint and test the core
-        if: steps.crates.outputs.core != ''
-        working-directory: ${{ steps.crates.outputs.core }}
-        run: |
-          cargo clippy --all-targets -- -D warnings
-          cargo test --lib
+      - name: Test the core crate
+        run: cargo test --workspace
 
       - name: Run doc tests
-        if: steps.crates.outputs.core != ''
-        working-directory: ${{ steps.crates.outputs.core }}
-        run: cargo test --doc
-
-      - name: Lint the binding crate
-        if: steps.crates.outputs.ffi != ''
-        run: cargo clippy --manifest-path ${{ steps.crates.outputs.ffi }}/Cargo.toml --all-targets -- -D warnings
+        run: cargo test --workspace --doc
 
       - name: Check formatting
-        if: steps.crates.outputs.core != ''
-        run: |
-          cargo fmt --check --manifest-path ${{ steps.crates.outputs.core }}/Cargo.toml
-          if [ -n "${{ steps.crates.outputs.ffi }}" ]; then
-            cargo fmt --check --manifest-path ${{ steps.crates.outputs.ffi }}/Cargo.toml
-          fi
+        run: cargo fmt --all --check
 
   bare-metal:
     runs-on: ubuntu-latest
@@ -75,7 +67,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v5
         with:
-          install_args: rust
+          mise_toml: |
+            [tools]
+            rust = { version = "1.99", components = "clippy", targets = "thumbv7em-none-eabihf" }
 
       - name: Locate the core crate
         id: crates
@@ -85,7 +79,6 @@ jobs:
           echo "core=$core" >> "$GITHUB_OUTPUT"
 
       - name: Build and lint on bare metal
-        if: steps.crates.outputs.core != ''
         working-directory: ${{ steps.crates.outputs.core }}
         run: |
           cargo build --target thumbv7em-none-eabihf

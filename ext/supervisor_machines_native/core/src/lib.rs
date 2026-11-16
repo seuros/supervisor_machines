@@ -1,4 +1,5 @@
 #![no_std]
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 
 //! Supervision decisions, in the OTP sense.
 //!
@@ -140,6 +141,7 @@ impl Span {
     /// Children in the span. Always at least one.
     #[must_use]
     pub const fn len(&self) -> usize {
+        // `first <= last` by construction.
         (self.last - self.first).saturating_add(1)
     }
 
