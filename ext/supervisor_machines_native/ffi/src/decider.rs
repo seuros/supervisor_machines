@@ -22,7 +22,7 @@ use std::time::Duration;
 use magnus::typed_data::Obj;
 use magnus::{Error, Integer, RArray, RModule, Ruby, Value, function, method, prelude::*};
 use matryona_machines::ruby::{
-    Symbols, class_name, duration, exact_array_with, integer, keep, nanoseconds,
+    Class, Symbols, class_name, duration, exact_array_with, integer, keep, nanoseconds,
 };
 use supervisor_machines::{
     Decision, Exit, Intensity, Policy, Recording, Refusal, Span, Strategy, Supervisor,
@@ -432,5 +432,7 @@ pub fn define(ruby: &Ruby, module: RModule) -> Result<(), Error> {
     class.define_method("recent_restarts", method!(Wrapper::recent_restarts, 1))?;
     class.define_method("restart_delay", method!(Wrapper::restart_delay, 3))?;
     class.define_method("inspect", method!(Wrapper::inspect, 0))?;
-    Ok(())
+    // Fix magnus's class for `Wrapper` now: building a Decider (`new`,
+    // `restore`) then runs no `Object.const_get` and always answers this class.
+    Class::pin_wrapped::<Wrapper>(ruby, class).map(drop)
 }
